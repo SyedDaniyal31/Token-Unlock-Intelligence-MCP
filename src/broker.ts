@@ -1,105 +1,227 @@
 /**
- * MCP broker / protocol handling.
- * Placeholder for @modelcontextprotocol/sdk integration.
+ * Unlock precompute pipeline: load data → computeImpactScore → upsert to PostgreSQL.
+ * Premium ingestion (3-layer) is in ./ingestion. Background only; no API routes. Safe for cron.
  */
 
-export interface ImpactScoreInput {
-  unlock_percent_supply: number | null;
-  unlock_vs_volume_ratio: number | null;
-  historical_avg_7d_return: number | null;
-  cohort_type: string | null;
+import { query } from "./db.js";
+import { runUnlockIngestionPipeline } from "./ingestion/index.js";
+import {
+  computeImpactScore,
+  type ImpactOutput,
+  type ImpactInput,
+} from "./impactEngine.js";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export type MarketRegime = "bull" | "neutral" | "bear";
+
+export type CohortType =
+  | "vc"
+  | "team"
+  | "foundation"
+  | "ecosystem"
+  | "airdrop"
+  | "strategic";
+
+export interface UnlockRawInput {
+  token_symbol: string;
+  unlock_percent_circulating: number;
+  unlock_percent_free_float: number;
+  unlock_usd_value: number;
+  avg_30d_volume_usd: number;
+  cohort_type: CohortType;
+  avg_7d_return_post_unlock: number;
+  token_performance_since_tge: number;
+  market_regime: MarketRegime;
+  next_unlock_date: Date;
 }
 
-export type ImpactScoreLevel = "Low" | "Medium" | "High";
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-export interface ImpactScoreResult {
-  impact_score: ImpactScoreLevel;
-  risk_summary: string;
+function safeDivide(a: number, b: number): number {
+  if (!b || b === 0) return 0;
+  return a / b;
 }
 
-/**
- * Compute impact score and risk summary from unlock metrics.
- * High/Medium thresholds applied first; remainder is Low.
- */
-export function computeImpactScore(input: ImpactScoreInput): ImpactScoreResult {
-  const {
-    unlock_percent_supply = null,
-    unlock_vs_volume_ratio = null,
-    historical_avg_7d_return = null,
-    cohort_type = null,
-  } = input;
-
-  const ratio = unlock_vs_volume_ratio ?? -1;
-  const pctSupply = unlock_percent_supply ?? -1;
-  const avgReturn = historical_avg_7d_return ?? 0;
-
-  let impact_score: ImpactScoreLevel;
-  let risk_summary: string;
-
-  // High risk
-  if (ratio > 0.5 || pctSupply > 5 || avgReturn < -5) {
-    impact_score = "High";
-    const reasons: string[] = [];
-    if (ratio > 0.5) {
-      reasons.push(
-        `Unlock is >50% of 30d volume (${(ratio * 100).toFixed(1)}%)—selling can overwhelm buy support.`
-      );
-    }
-    if (pctSupply > 5) {
-      reasons.push(
-        `Large supply unlock (${pctSupply.toFixed(1)}% of circulating supply)—expect elevated sell pressure.`
-      );
-    }
-    if (avgReturn < -5) {
-      reasons.push(
-        `Token down >5% in past 7 days (${avgReturn.toFixed(1)}%)—momentum is negative into unlock.`
-      );
-    }
-    risk_summary =
-      `High unlock risk. ${reasons.join(" ")} Action: Reduce size or hedge; consider waiting for post-unlock stabilization before adding.`;
-  }
-  // Medium risk
-  else if (
-    (ratio >= 0.2 && ratio <= 0.5) ||
-    (pctSupply >= 2 && pctSupply <= 5)
-  ) {
-    impact_score = "Medium";
-    const reasons: string[] = [];
-    if (ratio >= 0.2 && ratio <= 0.5) {
-      reasons.push(
-        `Unlock is 20–50% of 30d volume (${(ratio * 100).toFixed(1)}%)—moderate dilution risk.`
-      );
-    }
-    if (pctSupply >= 2 && pctSupply <= 5) {
-      reasons.push(
-        `Unlock size ${pctSupply.toFixed(1)}% of supply—watch for distribution.`
-      );
-    }
-    const cohortNote =
-      cohort_type && cohort_type.length > 0
-        ? ` Cohort: ${cohort_type}.`
-        : "";
-    risk_summary =
-      `Moderate unlock risk. ${reasons.join(" ")}${cohortNote} Action: Size positions cautiously; set stops and watch volume and order book around unlock date.`;
-  }
-  // Low risk
-  else {
-    impact_score = "Low";
-    const cohortNote =
-      cohort_type && cohort_type.length > 0
-        ? ` (${cohort_type} unlock).`
-        : "";
-    risk_summary =
-      `Low unlock risk. Unlock is small vs volume and supply.${cohortNote} Action: Standard position sizing; monitor for any change in volume or sentiment ahead of unlock.`;
-  }
-
-  return { impact_score, risk_summary };
+function toImpactInput(raw: UnlockRawInput): ImpactInput {
+  return {
+    unlock_percent_circulating: raw.unlock_percent_circulating,
+    unlock_percent_free_float: raw.unlock_percent_free_float,
+    unlock_usd_value: raw.unlock_usd_value,
+    avg_30d_volume_usd: raw.avg_30d_volume_usd,
+    cohort_type: raw.cohort_type,
+    avg_7d_return_post_unlock: raw.avg_7d_return_post_unlock,
+    token_performance_since_tge: raw.token_performance_since_tge,
+    market_regime: raw.market_regime,
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Data loader (Phase 1: mock)
+// ---------------------------------------------------------------------------
+
+async function loadUnlockData(): Promise<UnlockRawInput[]> {
+  const now = new Date();
+  const in30d = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const in45d = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
+  const in60d = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
+
+  return [
+    {
+      token_symbol: "ARB",
+      unlock_percent_circulating: 4.5,
+      unlock_percent_free_float: 6,
+      unlock_usd_value: 120_000_000,
+      avg_30d_volume_usd: 250_000_000,
+      cohort_type: "vc",
+      avg_7d_return_post_unlock: -3,
+      token_performance_since_tge: 80,
+      market_regime: "neutral",
+      next_unlock_date: in30d,
+    },
+    {
+      token_symbol: "OP",
+      unlock_percent_circulating: 2,
+      unlock_percent_free_float: 3,
+      unlock_usd_value: 25_000_000,
+      avg_30d_volume_usd: 180_000_000,
+      cohort_type: "ecosystem",
+      avg_7d_return_post_unlock: 2,
+      token_performance_since_tge: 150,
+      market_regime: "neutral",
+      next_unlock_date: in45d,
+    },
+    {
+      token_symbol: "APT",
+      unlock_percent_circulating: 8,
+      unlock_percent_free_float: 11,
+      unlock_usd_value: 280_000_000,
+      avg_30d_volume_usd: 350_000_000,
+      cohort_type: "team",
+      avg_7d_return_post_unlock: -9,
+      token_performance_since_tge: -30,
+      market_regime: "bear",
+      next_unlock_date: in60d,
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Upsert (requires UNIQUE(token_symbol) on unlock_analysis)
+// ---------------------------------------------------------------------------
+
+const UPSERT_SQL = `
+INSERT INTO unlock_analysis (
+  token_symbol,
+  next_unlock_date,
+  unlock_amount,
+  unlock_percent_supply,
+  avg_30d_volume_usd,
+  unlock_vs_volume_ratio,
+  cohort_type,
+  historical_avg_7d_return,
+  impact_score,
+  risk_summary,
+  updated_at
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+ON CONFLICT (token_symbol)
+DO UPDATE SET
+  next_unlock_date = EXCLUDED.next_unlock_date,
+  unlock_amount = EXCLUDED.unlock_amount,
+  unlock_percent_supply = EXCLUDED.unlock_percent_supply,
+  avg_30d_volume_usd = EXCLUDED.avg_30d_volume_usd,
+  unlock_vs_volume_ratio = EXCLUDED.unlock_vs_volume_ratio,
+  cohort_type = EXCLUDED.cohort_type,
+  historical_avg_7d_return = EXCLUDED.historical_avg_7d_return,
+  impact_score = EXCLUDED.impact_score,
+  risk_summary = EXCLUDED.risk_summary,
+  updated_at = EXCLUDED.updated_at
+`;
+
+async function upsertUnlockAnalysis(
+  token: UnlockRawInput,
+  impact: ImpactOutput
+): Promise<void> {
+  const unlockVsVolumeRatio = safeDivide(
+    token.unlock_usd_value,
+    token.avg_30d_volume_usd
+  );
+  const impactScore = impact.risk_level.toLowerCase();
+  const updatedAt = new Date();
+
+  await query(UPSERT_SQL, [
+    token.token_symbol,
+    token.next_unlock_date,
+    token.unlock_usd_value,
+    token.unlock_percent_circulating,
+    token.avg_30d_volume_usd,
+    unlockVsVolumeRatio,
+    token.cohort_type,
+    token.avg_7d_return_post_unlock,
+    impactScore,
+    impact.risk_summary,
+    updatedAt,
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Precompute runner
+// ---------------------------------------------------------------------------
+
+export async function runUnlockPrecompute(): Promise<void> {
+  const unlocks = await loadUnlockData();
+
+  for (const raw of unlocks) {
+    try {
+      const input = toImpactInput(raw);
+      const impact = computeImpactScore(input);
+      await upsertUnlockAnalysis(raw, impact);
+      const logLine = JSON.stringify({
+        token_symbol: raw.token_symbol,
+        final_score: impact.final_score,
+        risk_level: impact.risk_level,
+      });
+      process.stdout.write(logLine + "\n");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        JSON.stringify({
+          token_symbol: raw.token_symbol,
+          error: message,
+        }) + "\n"
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Startup hook
+// ---------------------------------------------------------------------------
+
+export async function initializeUnlockEngine(): Promise<void> {
+  try {
+    await runUnlockIngestionPipeline();
+    await runUnlockPrecompute();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      JSON.stringify({ scope: "initializeUnlockEngine", error: message }) + "\n"
+    );
+  }
+}
+
+export { runUnlockIngestionPipeline };
+
+// ---------------------------------------------------------------------------
+// MCP broker (shutdown)
+// ---------------------------------------------------------------------------
 
 export function createBroker(): { shutdown: () => Promise<void> } {
   return {
-    async shutdown(): Promise<void> {
-      // Cleanup MCP resources
-    },
+    async shutdown(): Promise<void> {},
   };
 }

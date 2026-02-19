@@ -6,18 +6,13 @@ import { createContextMiddleware } from "@ctxprotocol/sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { query, closePool } from "./db.js";
+import {
+  runUnlockPrecompute,
+  runUnlockIngestionPipeline,
+  initializeUnlockEngine,
+} from "./broker.js";
 
 const PORT = Number(process.env.PORT) || 3000;
-
-/** Precompute unlock analysis data. Runs on schedule and once on startup. */
-async function runUnlockPrecompute(): Promise<void> {
-  try {
-    // TODO: fetch external data and upsert into unlock_analysis
-    console.log("[runUnlockPrecompute] started at", new Date().toISOString());
-  } catch (err) {
-    console.error("[runUnlockPrecompute] error:", err instanceof Error ? err.message : err);
-  }
-}
 
 const app = express();
 app.use(express.json());
@@ -236,13 +231,20 @@ app.get("/mcp", async (req: Request, res: Response): Promise<void> => {
 
 const server = app.listen(PORT, (): void => {
   console.log(`Server listening on http://localhost:${PORT}`);
-  runUnlockPrecompute().catch((err) => {
-    console.error("[runUnlockPrecompute] startup run failed:", err);
-  });
+  initializeUnlockEngine();
 });
 
 const precomputeCron = cron.schedule("0 */6 * * *", () => {
-  runUnlockPrecompute();
+  runUnlockIngestionPipeline()
+    .then(() => runUnlockPrecompute())
+    .catch((err: Error) => {
+      process.stderr.write(
+        JSON.stringify({
+          scope: "cron",
+          error: err instanceof Error ? err.message : String(err),
+        }) + "\n"
+      );
+    });
 });
 
 async function shutdown(): Promise<void> {
