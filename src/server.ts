@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
+import rateLimit from "express-rate-limit";
 import cron from "node-cron";
 import { z } from "zod";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
@@ -11,15 +12,26 @@ import {
   runUnlockIngestionPipeline,
   initializeUnlockEngine,
 } from "./broker.js";
-
-const PORT = Number(process.env.PORT) || 3000;
+import logger from "./logger.js";
+import type { Server } from "http";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 100,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
 
-// Public route: no auth
 app.get("/health", (_req: Request, res: Response): void => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // Protect /mcp: requires Context Protocol JWT in Authorization header; returns 401 if unauthorized
@@ -129,16 +141,13 @@ function rowToOutput(row: {
     }
 
     function logStructured(structuredContent: AnalyzeTokenUnlockOutput, resultFound: boolean): void {
-      console.log(
-        JSON.stringify({
-          tool: "analyze_token_unlock",
-          token_symbol: structuredContent.token_symbol,
-          responseTimeMs: Date.now() - startMs,
-          resultFound,
-          impact_score: structuredContent.impact_score,
-          timestamp: new Date().toISOString(),
-        })
-      );
+      logger.info({
+        tool: "analyze_token_unlock",
+        token_symbol: structuredContent.token_symbol,
+        responseTimeMs: Date.now() - startMs,
+        resultFound,
+        impact_score: structuredContent.impact_score,
+      });
     }
 
     try {
@@ -181,10 +190,7 @@ function rowToOutput(row: {
       return toResult(structuredContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[analyze_token_unlock] error:", message);
-      if (err instanceof Error && err.stack) {
-        console.error("[analyze_token_unlock] stack:", err.stack);
-      }
+      logger.error({ err, message }, "analyze_token_unlock error");
       const out = safeErrorOutput(
         tokenSymbol,
         `Unlock analysis failed: ${message}.`
@@ -200,14 +206,14 @@ const transport = new StreamableHTTPServerTransport({
 });
 
 mcpServer.connect(transport).catch((err: Error) => {
-  console.error("MCP server connect error:", err);
+  logger.error({ err }, "MCP server connect error");
 });
 
 app.post("/mcp", async (req: Request, res: Response): Promise<void> => {
   try {
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    console.error("MCP POST error:", err);
+    logger.error({ err }, "MCP POST error");
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: "2.0",
@@ -222,39 +228,45 @@ app.get("/mcp", async (req: Request, res: Response): Promise<void> => {
   try {
     await transport.handleRequest(req, res);
   } catch (err) {
-    console.error("MCP GET error:", err);
+    logger.error({ err }, "MCP GET error");
     if (!res.headersSent) {
       res.status(500).send("Internal server error");
     }
   }
 });
 
-const server = app.listen(PORT, (): void => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-  initializeUnlockEngine();
+app.use((err: Error, _req: Request, res: Response, _next: () => void): void => {
+  logger.error({ err }, "Unhandled error");
+  if (!res.headersSent) {
+    res.status(500).json({ error: "internal_error" });
+  }
 });
+
+let httpServer: Server | null = null;
 
 const precomputeCron = cron.schedule("0 */6 * * *", () => {
   runUnlockIngestionPipeline()
     .then(() => runUnlockPrecompute())
     .catch((err: Error) => {
-      process.stderr.write(
-        JSON.stringify({
-          scope: "cron",
-          error: err instanceof Error ? err.message : String(err),
-        }) + "\n"
-      );
+      logger.error({ err, scope: "cron" }, "Precompute cron error");
     });
 });
 
-async function shutdown(): Promise<void> {
-  console.log("Shutting down...");
+export function start(port: number): Server {
+  httpServer = app.listen(port, (): void => {
+    logger.info({ port }, "Server listening");
+    initializeUnlockEngine();
+  });
+  return httpServer;
+}
+
+export async function shutdown(): Promise<void> {
+  logger.info("Shutting down...");
   precomputeCron.stop();
-  server.close();
+  if (httpServer) {
+    httpServer.close();
+  }
   await transport.close();
   await closePool();
   process.exit(0);
 }
-
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);

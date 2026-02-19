@@ -5,6 +5,7 @@
  */
 
 import { query } from "../db.js";
+import logger from "../logger.js";
 import { listUnlockSchedules, updateLastVerifiedBlock } from "./registry.js";
 import { getDefaultChainProvider } from "./chainProvider.js";
 import type { ParsedUnlockEvent, UnlockEventType } from "./types.js";
@@ -77,14 +78,12 @@ export async function verifyUnlocksOnChain(): Promise<{
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        JSON.stringify({
-          layer: "verification",
-          token_symbol: schedule.token_symbol,
-          contract_address: schedule.contract_address,
-          error: message,
-        }) + "\n"
-      );
+      logger.error({
+        layer: "verification",
+        token_symbol: schedule.token_symbol,
+        contract_address: schedule.contract_address,
+        error: message,
+      });
     }
   }
 

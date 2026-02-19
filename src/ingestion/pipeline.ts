@@ -4,6 +4,7 @@
  */
 
 import { query } from "../db.js";
+import logger from "../logger.js";
 import { verifyUnlocksOnChain } from "./verification.js";
 import { getUnprocessedEvents, markEventProcessed } from "./verification.js";
 import { analyzeUnlockFlow } from "./flowAnalysis.js";
@@ -31,13 +32,9 @@ DO UPDATE SET
 `;
 
 export async function runUnlockIngestionPipeline(): Promise<void> {
-  const log = (obj: Record<string, unknown>) => {
-    process.stdout.write(JSON.stringify(obj) + "\n");
-  };
-
   try {
     const { eventsInserted, schedulesProcessed } = await verifyUnlocksOnChain();
-    log({ step: "verify", eventsInserted, schedulesProcessed });
+    logger.info({ step: "verify", eventsInserted, schedulesProcessed });
 
     const events = await getUnprocessedEvents();
     for (const event of events) {
@@ -52,14 +49,12 @@ export async function runUnlockIngestionPipeline(): Promise<void> {
         await markEventProcessed(event.id);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(
-          JSON.stringify({
-            step: "analyze_flow",
-            unlock_event_id: event.id,
-            token_symbol: event.token_symbol,
-            error: message,
-          }) + "\n"
-        );
+        logger.error({
+          step: "analyze_flow",
+          unlock_event_id: event.id,
+          token_symbol: event.token_symbol,
+          error: message,
+        });
       }
     }
 
@@ -89,7 +84,7 @@ export async function runUnlockIngestionPipeline(): Promise<void> {
           "low",
           `Sellable supply: ${supply.sellable_amount.toFixed(0)} (${supply.percent_sellable.toFixed(1)}% of claimed).`,
         ]);
-        log({
+        logger.info({
           step: "upsert_analysis",
           token_symbol: tokenSymbol,
           sellable_amount: supply.sellable_amount,
@@ -97,20 +92,15 @@ export async function runUnlockIngestionPipeline(): Promise<void> {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        process.stderr.write(
-          JSON.stringify({
-            step: "compute_sellable",
-            token_symbol: tokenSymbol,
-            error: message,
-          }) + "\n"
-        );
+        logger.error({
+          step: "compute_sellable",
+          token_symbol: tokenSymbol,
+          error: message,
+        });
       }
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      JSON.stringify({ scope: "runUnlockIngestionPipeline", error: message }) +
-        "\n"
-    );
+    logger.error({ scope: "runUnlockIngestionPipeline", error: message });
   }
 }

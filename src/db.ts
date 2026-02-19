@@ -1,6 +1,7 @@
 import "dotenv/config";
 import pg from "pg";
 import type { PoolConfig, QueryResult, QueryResultRow } from "pg";
+import logger from "./logger.js";
 
 const { Pool } = pg;
 
@@ -15,12 +16,16 @@ const poolConfig: PoolConfig = {
   max: 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
 };
 
 const pool = new Pool(poolConfig);
 
 pool.on("error", (err: Error): void => {
-  console.error("Unexpected pool error:", err.message);
+  logger.error({ err: err.message, message: "Unexpected pool error" });
 });
 
 /**
@@ -36,8 +41,7 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown database error";
-    const cause = err instanceof Error ? err : new Error(String(err));
-    throw new Error(`Database query failed: ${message}`, { cause });
+    throw new Error(`Database query failed: ${message}`);
   }
 }
 

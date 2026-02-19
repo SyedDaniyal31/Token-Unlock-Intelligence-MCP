@@ -10,6 +10,7 @@ import {
   type ImpactOutput,
   type ImpactInput,
 } from "./impactEngine.js";
+import logger from "./logger.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -180,20 +181,14 @@ export async function runUnlockPrecompute(): Promise<void> {
       const input = toImpactInput(raw);
       const impact = computeImpactScore(input);
       await upsertUnlockAnalysis(raw, impact);
-      const logLine = JSON.stringify({
+      logger.info({
         token_symbol: raw.token_symbol,
         final_score: impact.final_score,
         risk_level: impact.risk_level,
       });
-      process.stdout.write(logLine + "\n");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(
-        JSON.stringify({
-          token_symbol: raw.token_symbol,
-          error: message,
-        }) + "\n"
-      );
+      logger.error({ token_symbol: raw.token_symbol, error: message });
     }
   }
 }
@@ -208,9 +203,7 @@ export async function initializeUnlockEngine(): Promise<void> {
     await runUnlockPrecompute();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      JSON.stringify({ scope: "initializeUnlockEngine", error: message }) + "\n"
-    );
+    logger.error({ scope: "initializeUnlockEngine", error: message });
   }
 }
 
