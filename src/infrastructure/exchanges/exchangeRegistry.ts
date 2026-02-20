@@ -56,6 +56,7 @@ export class DefaultExchangeRegistry implements ExchangeRegistry {
     return addressToLabel.get(address.toLowerCase().trim()) ?? null;
   }
 
+  /** Optional chainId reserved for future per-chain exchange labels/clusters. Current behavior is global. */
   getExchangeInfo(address: string, _chainId?: string): ExchangeInfo {
     initFromLabels();
     const key = address.toLowerCase().trim();

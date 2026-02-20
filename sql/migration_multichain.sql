@@ -1,6 +1,13 @@
 -- Multi-chain: chain_id on schedules, events, vesting_analysis, unlock_flow_analysis
+--
+-- Safety:
+-- - Run after base tables exist (unlock_schedules, unlock_events, vesting_analysis,
+--   unlock_flow_analysis, cluster_flow_aggregation). Existing rows receive chain_id = 'ethereum'
+--   via DEFAULT; no backfill needed before adding NOT NULL.
+-- - UNIQUE/PRIMARY KEY changes drop existing constraints by name (IF EXISTS) then add new ones.
+--   If your DB has different constraint names, adjust DROP CONSTRAINT accordingly.
 
--- unlock_schedules: add chain_id, update unique
+-- unlock_schedules: add chain_id, update unique (existing rows get DEFAULT 'ethereum')
 ALTER TABLE unlock_schedules ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT 'ethereum';
 ALTER TABLE unlock_schedules DROP CONSTRAINT IF EXISTS unlock_schedules_token_symbol_contract_address_key;
 ALTER TABLE unlock_schedules ADD CONSTRAINT unlock_schedules_token_contract_chain_key

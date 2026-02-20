@@ -84,10 +84,27 @@ export async function listUnlockSchedules(): Promise<TokenMetadata[]> {
   }));
 }
 
+/**
+ * Returns distinct chain_ids that have unlock activity for this token (events or schedules).
+ * Used for multi-chain report breakdown and combined_score aggregation. Defaults omitted chain_id to ethereum in DB.
+ */
+export async function getChainIdsForToken(tokenSymbol: string): Promise<string[]> {
+  const result = await query<{ chain_id: string | null }>(
+    `(SELECT DISTINCT COALESCE(chain_id, 'ethereum') AS chain_id FROM unlock_events WHERE token_symbol = $1)
+     UNION
+     (SELECT DISTINCT COALESCE(chain_id, 'ethereum') AS chain_id FROM unlock_schedules WHERE token_symbol = $1)
+     ORDER BY chain_id`,
+    [tokenSymbol, tokenSymbol]
+  );
+  const ids = result.rows.map((r) => r.chain_id ?? "ethereum").filter(Boolean);
+  return ids.length > 0 ? ids : ["ethereum"];
+}
+
 export async function getScheduleByToken(
   tokenSymbol: string,
   chainId?: string
 ): Promise<TokenMetadata | null> {
+  const effectiveChainId = chainId ?? "ethereum";
   const result = await query<{
     token_symbol: string;
     contract_address: string;
@@ -101,16 +118,11 @@ export async function getScheduleByToken(
     vesting_type: string | null;
     chain_id: string | null;
   }>(
-    chainId
-      ? `SELECT token_symbol, contract_address, beneficiary_label, total_allocation,
-                vesting_start, vesting_cliff, vesting_end, release_frequency,
-                last_verified_block::TEXT, vesting_type, chain_id
-         FROM unlock_schedules WHERE token_symbol = $1 AND chain_id = $2 LIMIT 1`
-      : `SELECT token_symbol, contract_address, beneficiary_label, total_allocation,
-                vesting_start, vesting_cliff, vesting_end, release_frequency,
-                last_verified_block::TEXT, vesting_type, chain_id
-         FROM unlock_schedules WHERE token_symbol = $1 LIMIT 1`,
-    chainId ? [tokenSymbol, chainId] : [tokenSymbol]
+    `SELECT token_symbol, contract_address, beneficiary_label, total_allocation,
+            vesting_start, vesting_cliff, vesting_end, release_frequency,
+            last_verified_block::TEXT, vesting_type, chain_id
+     FROM unlock_schedules WHERE token_symbol = $1 AND chain_id = $2 LIMIT 1`,
+    [tokenSymbol, effectiveChainId]
   );
   const r = result.rows[0];
   if (!r) return null;

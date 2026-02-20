@@ -107,6 +107,9 @@ export type GetChainProvider = (chainId: string) => ChainProvider;
  * Verify unlocks on chain. Uses getChainProvider(schedule.chain_id) per schedule for multi-chain.
  * If getProvider is omitted, uses chainProviderFactory.getChainProvider.
  * If a single ChainProvider is passed (legacy), that provider is used for all schedules.
+ *
+ * Concurrency: schedules are processed sequentially to avoid DB write races (inserts/updates
+ * per schedule). Each chain provider applies its own rate limiting (e.g. 100ms per batch).
  */
 export async function verifyUnlocksOnChain(
   chainProviderOrGetProvider?: ChainProvider | GetChainProvider

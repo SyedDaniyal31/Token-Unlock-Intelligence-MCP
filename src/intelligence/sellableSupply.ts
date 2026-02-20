@@ -23,6 +23,11 @@ export interface SellableSupplyResult {
   vesting_type?: string | null;
 }
 
+/**
+ * When chainId is provided: per-chain supply for that chain only.
+ * When chainId is omitted: aggregate across all chains (no double-count; deterministic).
+ * Default chain for single-chain callers: use chainId "ethereum" explicitly if you want one chain.
+ */
 export async function computeSellableSupply(
   tokenSymbol: string,
   avg30dVolumeUsd?: number,
@@ -31,12 +36,12 @@ export async function computeSellableSupply(
   const since = new Date(Date.now() - THIRTY_DAYS_MS);
 
   const eventsResult = await query<{ id: string; amount: string }>(
-    chainId
+    chainId != null && chainId !== ""
       ? `SELECT id, amount FROM unlock_events
          WHERE token_symbol = $1 AND chain_id = $2 AND timestamp >= $3`
       : `SELECT id, amount FROM unlock_events
          WHERE token_symbol = $1 AND timestamp >= $2`,
-    chainId ? [tokenSymbol, chainId, since] : [tokenSymbol, since]
+    chainId != null && chainId !== "" ? [tokenSymbol, chainId, since] : [tokenSymbol, since]
   );
 
   let totalClaimed = 0;
@@ -76,7 +81,10 @@ export async function computeSellableSupply(
       ? real_sellable_supply / avg30dVolumeUsd
       : 0;
 
-  const vesting = await getVestingAnalysisByToken(tokenSymbol, chainId);
+  const vesting = await getVestingAnalysisByToken(
+    tokenSymbol,
+    chainId != null && chainId !== "" ? chainId : undefined
+  );
 
   return {
     scheduled_amount: totalClaimed,

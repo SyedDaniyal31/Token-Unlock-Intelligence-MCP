@@ -100,6 +100,7 @@ async function getInflowToClusterForToken(
 /**
  * Cluster-level flow analysis: clusterTag, velocity (2+ to exchange in 6 blocks or 10 min),
  * concentration ratio, routed_to_exchange, and updated risk (HIGH/MODERATE/none).
+ * Called per event (sequentially in pipeline); chain_id from event avoids cross-chain DB races.
  */
 export async function analyzeUnlockFlow(
   event: UnlockEventForFlow,

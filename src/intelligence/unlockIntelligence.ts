@@ -4,8 +4,9 @@ import type {
   ExchangeRegistry,
   IntelligenceReport,
   RiskLevel,
+  ChainReport,
 } from "../core/types.js";
-import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
+import { getScheduleByToken, getChainIdsForToken } from "../ingestion/unlockRegistry.js";
 import { verifyUnlocksOnChain, getUnprocessedEvents, markEventProcessed } from "../ingestion/unlockVerifier.js";
 import { analyzeUnlockFlow } from "../ingestion/flowAnalyzer.js";
 import { computeSellableSupply, toReportSellableSupply } from "./sellableSupply.js";
@@ -94,6 +95,43 @@ export async function generateUnlockIntelligence(
     sellable_supply: toReportSellableSupply(supply),
     fetched_at: new Date().toISOString(),
   };
+
+  const chainIds = await getChainIdsForToken(symbol);
+  if (chainIds.length > 1 || (chainIds.length === 1 && chainIds[0] !== "ethereum")) {
+    const chains: Record<string, ChainReport> = {};
+    let weightedSum = 0;
+    let weightSum = 0;
+    for (const cid of chainIds) {
+      const chainSupply = await computeSellableSupply(symbol, market.avg_30d_volume_usd, cid);
+      const chainScoringInput = buildScoringInput(
+        symbol,
+        market,
+        chainSupply,
+        cohortType,
+        0,
+        0
+      );
+      const chainScoring: ScoringOutput = computeImpactScore(chainScoringInput);
+      const chainPercent =
+        chainSupply.scheduled_amount > 0
+          ? (chainSupply.real_sellable_supply / chainSupply.scheduled_amount) * 100
+          : 0;
+      chains[cid] = {
+        next_unlock_date: nextUnlock ? new Date(nextUnlock).toISOString() : "",
+        unlock_amount: chainSupply.claimed_amount,
+        unlock_percent_supply: chainPercent,
+        risk_level: chainScoring.risk_level,
+        score_numeric: chainScoring.score,
+        sellable_supply: toReportSellableSupply(chainSupply),
+      };
+      const weight = Math.max(chainSupply.real_sellable_supply, chainSupply.claimed_amount, 1);
+      weightedSum += chainScoring.score * weight;
+      weightSum += weight;
+    }
+    report.chains = chains;
+    report.combined_score =
+      weightSum > 0 ? Math.round(Math.min(100, Math.max(0, weightedSum / weightSum))) : scoring.score;
+  }
 
   return report;
 }

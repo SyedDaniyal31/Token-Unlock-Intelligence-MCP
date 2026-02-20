@@ -96,11 +96,13 @@ function mapVestingRow(r: {
   };
 }
 
+/** When chainId is omitted, defaults to "ethereum" for consistent single-chain behavior. */
 export async function getVestingAnalysis(
   tokenSymbol: string,
   contractAddress: string,
   chainId?: string
 ): Promise<VestingAnalysisRow | null> {
+  const effectiveChainId = chainId ?? "ethereum";
   const result = await query<{
     token_symbol: string;
     contract_address: string;
@@ -116,41 +118,80 @@ export async function getVestingAnalysis(
     vesting_confidence: string | null;
     last_updated: Date;
   }>(
-    chainId
-      ? `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 AND contract_address = $2 AND chain_id = $3 LIMIT 1`
-      : `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 AND contract_address = $2 LIMIT 1`,
-    chainId ? [tokenSymbol, contractAddress, chainId] : [tokenSymbol, contractAddress]
+    `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 AND contract_address = $2 AND chain_id = $3 LIMIT 1`,
+    [tokenSymbol, contractAddress, effectiveChainId]
   );
   const r = result.rows[0];
   if (!r) return null;
   return mapVestingRow(r);
 }
 
+/**
+ * When chainId is provided: returns the single vesting row for that token on that chain.
+ * When chainId is omitted: aggregates across all chains (sum expected_vested, claimed_amount,
+ * remaining_locked) so combined supply/vesting logic does not double-count and has no undefined behavior.
+ */
 export async function getVestingAnalysisByToken(
   tokenSymbol: string,
   chainId?: string
 ): Promise<VestingAnalysisRow | null> {
-  const result = await query<{
-    token_symbol: string;
-    contract_address: string;
-    chain_id: string | null;
-    vesting_type: string | null;
-    expected_vested: string;
-    claimed_amount: string;
-    remaining_locked: string;
-    next_unlock_estimate: string | null;
-    vesting_rate_per_second: string | null;
-    accelerated_claim: boolean;
-    unlock_density: string | null;
-    vesting_confidence: string | null;
-    last_updated: Date;
+  if (chainId != null && chainId !== "") {
+    const result = await query<{
+      token_symbol: string;
+      contract_address: string;
+      chain_id: string | null;
+      vesting_type: string | null;
+      expected_vested: string;
+      claimed_amount: string;
+      remaining_locked: string;
+      next_unlock_estimate: string | null;
+      vesting_rate_per_second: string | null;
+      accelerated_claim: boolean;
+      unlock_density: string | null;
+      vesting_confidence: string | null;
+      last_updated: Date;
+    }>(
+      `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 AND chain_id = $2 LIMIT 1`,
+      [tokenSymbol, chainId]
+    );
+    const r = result.rows[0];
+    if (!r) return null;
+    return mapVestingRow(r);
+  }
+
+  const aggregated = await query<{
+    expected_vested_sum: string;
+    claimed_amount_sum: string;
+    remaining_locked_sum: string;
+    next_unlock_estimate_max: string | null;
+    vesting_type_any: string | null;
   }>(
-    chainId
-      ? `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 AND chain_id = $2 LIMIT 1`
-      : `SELECT ${VESTING_SELECT} FROM vesting_analysis WHERE token_symbol = $1 LIMIT 1`,
-    chainId ? [tokenSymbol, chainId] : [tokenSymbol]
+    `SELECT
+       COALESCE(SUM(expected_vested::numeric), 0) AS expected_vested_sum,
+       COALESCE(SUM(claimed_amount::numeric), 0) AS claimed_amount_sum,
+       COALESCE(SUM(remaining_locked::numeric), 0) AS remaining_locked_sum,
+       MAX(next_unlock_estimate::numeric) AS next_unlock_estimate_max,
+       (ARRAY_AGG(vesting_type) FILTER (WHERE vesting_type IS NOT NULL))[1] AS vesting_type_any
+     FROM vesting_analysis WHERE token_symbol = $1`,
+    [tokenSymbol]
   );
-  const r = result.rows[0];
-  if (!r) return null;
-  return mapVestingRow(r);
+  const row = aggregated.rows[0];
+  if (!row || (parseFloat(row.claimed_amount_sum) === 0 && parseFloat(row.expected_vested_sum) === 0)) {
+    return null;
+  }
+  return {
+    token_symbol: tokenSymbol,
+    contract_address: "",
+    chain_id: undefined,
+    vesting_type: row.vesting_type_any ?? "multi",
+    expected_vested: parseFloat(row.expected_vested_sum) || 0,
+    claimed_amount: parseFloat(row.claimed_amount_sum) || 0,
+    remaining_locked: parseFloat(row.remaining_locked_sum) || 0,
+    next_unlock_estimate: row.next_unlock_estimate_max != null ? parseFloat(row.next_unlock_estimate_max) : null,
+    last_updated: new Date(),
+    vesting_rate_per_second: null,
+    accelerated_claim: false,
+    unlock_density: null,
+    vesting_confidence: 0.3,
+  };
 }
