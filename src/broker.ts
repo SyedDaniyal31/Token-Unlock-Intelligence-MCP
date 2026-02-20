@@ -1,10 +1,10 @@
 /**
- * Unlock precompute pipeline: load data → computeImpactScore → upsert to PostgreSQL.
- * Premium ingestion (3-layer) is in ./ingestion. Background only; no API routes. Safe for cron.
+ * Unlock precompute pipeline: registry (canonical) → computeImpactScore → upsert to PostgreSQL.
+ * Schedule source: data/unlockRegistry.json synced to DB. No external unlock calendar API.
  */
 
 import { query } from "./db.js";
-import { runUnlockIngestionPipeline } from "./ingestion/index.js";
+import { listUnlockSchedules } from "./ingestion/unlockRegistry.js";
 import {
   computeImpactScore,
   type ImpactOutput,
@@ -62,53 +62,27 @@ function toImpactInput(raw: UnlockRawInput): ImpactInput {
 }
 
 // ---------------------------------------------------------------------------
-// Data loader (Phase 1: mock)
+// Data loader — canonical source: unlock_schedules (synced from data/unlockRegistry.json)
 // ---------------------------------------------------------------------------
 
-async function loadUnlockData(): Promise<UnlockRawInput[]> {
-  const now = new Date();
-  const in30d = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-  const in45d = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
-  const in60d = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000);
-
-  return [
-    {
-      token_symbol: "ARB",
-      unlock_percent_circulating: 4.5,
-      unlock_percent_free_float: 6,
-      unlock_usd_value: 120_000_000,
-      avg_30d_volume_usd: 250_000_000,
-      cohort_type: "vc",
-      avg_7d_return_post_unlock: -3,
-      token_performance_since_tge: 80,
-      market_regime: "neutral",
-      next_unlock_date: in30d,
-    },
-    {
-      token_symbol: "OP",
-      unlock_percent_circulating: 2,
-      unlock_percent_free_float: 3,
-      unlock_usd_value: 25_000_000,
-      avg_30d_volume_usd: 180_000_000,
-      cohort_type: "ecosystem",
-      avg_7d_return_post_unlock: 2,
-      token_performance_since_tge: 150,
-      market_regime: "neutral",
-      next_unlock_date: in45d,
-    },
-    {
-      token_symbol: "APT",
-      unlock_percent_circulating: 8,
-      unlock_percent_free_float: 11,
-      unlock_usd_value: 280_000_000,
-      avg_30d_volume_usd: 350_000_000,
-      cohort_type: "team",
-      avg_7d_return_post_unlock: -9,
-      token_performance_since_tge: -30,
-      market_regime: "bear",
-      next_unlock_date: in60d,
-    },
-  ];
+async function loadUnlockDataFromRegistry(): Promise<UnlockRawInput[]> {
+  const schedules = await listUnlockSchedules();
+  return schedules.map((s) => {
+    const totalAlloc = parseFloat(s.total_allocation) || 0;
+    const nextDate = s.vesting_end ? new Date(s.vesting_end) : new Date();
+    return {
+      token_symbol: s.token_symbol,
+      unlock_percent_circulating: 0,
+      unlock_percent_free_float: 0,
+      unlock_usd_value: totalAlloc,
+      avg_30d_volume_usd: 0,
+      cohort_type: (s.beneficiary_label?.toLowerCase() ?? "ecosystem") as CohortType,
+      avg_7d_return_post_unlock: 0,
+      token_performance_since_tge: 0,
+      market_regime: "neutral" as MarketRegime,
+      next_unlock_date: nextDate,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +148,7 @@ async function upsertUnlockAnalysis(
 // ---------------------------------------------------------------------------
 
 export async function runUnlockPrecompute(): Promise<void> {
-  const unlocks = await loadUnlockData();
+  const unlocks = await loadUnlockDataFromRegistry();
 
   for (const raw of unlocks) {
     try {
@@ -199,15 +173,12 @@ export async function runUnlockPrecompute(): Promise<void> {
 
 export async function initializeUnlockEngine(): Promise<void> {
   try {
-    await runUnlockIngestionPipeline();
     await runUnlockPrecompute();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ scope: "initializeUnlockEngine", error: message });
   }
 }
-
-export { runUnlockIngestionPipeline };
 
 // ---------------------------------------------------------------------------
 // MCP broker (shutdown)

@@ -1,0 +1,7 @@
+{
+  "chains": {
+    "ethereum": { "rpcUrl": "ETH_RPC_URL", "chainId": 1 },
+    "arbitrum": { "rpcUrl": "ARB_RPC_URL", "chainId": 42161 },
+    "bsc": { "rpcUrl": "BSC_RPC_URL", "chainId": 56 }
+  }
+}

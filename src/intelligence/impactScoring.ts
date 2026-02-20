@@ -6,6 +6,7 @@ export interface ScoringInput {
   percent_circulating_supply: number;
   percent_volume: number;
   percent_transferred_to_exchanges: number;
+  liquidity_ratio?: number;
   liquidity_depth_multiplier: number;
   behavioral_multiplier: number;
   cohort_type: string;
@@ -18,69 +19,14 @@ export interface ScoringOutput {
   score: number;
   risk_level: RiskLevel;
   explanation: string;
+  primary_driver: string;
+  sell_pressure_estimate: string;
 }
 
-const SIZE_CAP = 25;
-const SIZE_CIRC_WEIGHT = 2;
-const SIZE_FREE_FLOAT_WEIGHT = 1.5;
-
-function computeSizeScore(
-  percentCirculating: number,
-  percentFreeFloat: number
-): number {
-  const raw =
-    percentCirculating * SIZE_CIRC_WEIGHT +
-    percentFreeFloat * SIZE_FREE_FLOAT_WEIGHT;
-  return Math.min(SIZE_CAP, Math.max(0, raw));
-}
-
-const LIQUIDITY_MAX = 25;
-
-function computeLiquidityScore(
-  unlockVsVolume: number,
-  liquidityMultiplier: number
-): number {
-  if (unlockVsVolume <= 0) return LIQUIDITY_MAX;
-  const base =
-    unlockVsVolume < 0.1 ? 2 :
-    unlockVsVolume < 0.25 ? 8 :
-    unlockVsVolume < 0.5 ? 15 :
-    unlockVsVolume < 1.0 ? 20 : 25;
-  return Math.min(LIQUIDITY_MAX, base * liquidityMultiplier);
-}
-
-const COHORT_BASE: Record<string, number> = {
-  vc: 18,
-  team: 15,
-  foundation: 12,
-  ecosystem: 8,
-  airdrop: 6,
-  strategic: 10,
-};
-
-function computeCohortScore(
-  cohortType: string,
-  tokenPerformanceSinceTge: number
-): number {
-  const base = COHORT_BASE[cohortType.toLowerCase()] ?? 10;
-  if (tokenPerformanceSinceTge < -50) return Math.max(0, base * 0.8);
-  if (tokenPerformanceSinceTge > 200) return Math.min(20, base * 1.2);
-  return Math.max(0, Math.min(20, base));
-}
-
-function computeHistoricalScore(avg7dReturn: number): number {
-  if (avg7dReturn > 5) return 0;
-  if (avg7dReturn >= 0) return 3;
-  if (avg7dReturn > -5) return 6;
-  if (avg7dReturn > -10) return 10;
-  return 15;
-}
-
-const REGIME_MULT: Record<string, number> = {
-  bull: 0.8,
-  neutral: 1.0,
-  bear: 1.2,
-};
+const W_UNLOCK = 0.35;
+const W_LIQUIDITY = 0.35;
+const W_EXCHANGE_FLOW = 0.2;
+const W_BEHAVIOR = 0.1;
 
 function getRiskLevel(score: number): RiskLevel {
   if (score <= 30) return "low";
@@ -89,57 +35,51 @@ function getRiskLevel(score: number): RiskLevel {
   return "extreme";
 }
 
-function buildExplanation(
-  input: ScoringInput,
-  score: number,
-  riskLevel: RiskLevel,
-  components: { size: number; liquidity: number; cohort: number; historical: number; behavioral: number }
-): string {
-  const parts: string[] = [];
-  parts.push(`Unlock represents ${input.percent_circulating_supply.toFixed(1)}% of circulating supply.`);
-  parts.push(`Liquidity score component: ${components.liquidity.toFixed(0)}.`);
-  parts.push(`Cohort (${input.cohort_type}): ${components.cohort.toFixed(0)}.`);
-  parts.push(`Historical 7d return post-unlock: ${input.avg_7d_return_post_unlock}%.`);
-  parts.push(`Behavioral multiplier: ${input.behavioral_multiplier.toFixed(2)}.`);
-  parts.push(`Final score: ${score} (${riskLevel} risk).`);
-  return parts.join(" ");
-}
-
 /**
- * Advanced trader logic: size, liquidity, cohort, historical, regime, behavioral.
+ * Institutional formula: weighted sum of unlock %, liquidity ratio, exchange flow ratio, behavior.
+ * Clamped 0–100. Returns primary_driver and sell_pressure_estimate.
  */
 export function computeImpactScore(input: ScoringInput): ScoringOutput {
-  const size_score = computeSizeScore(
-    input.percent_circulating_supply,
-    input.percent_circulating_supply * 1.2
-  );
-  const liquidity_score = computeLiquidityScore(
-    input.percent_volume,
-    input.liquidity_depth_multiplier
-  );
-  const cohort_score = computeCohortScore(
-    input.cohort_type,
-    input.token_performance_since_tge
-  );
-  const historical_score = computeHistoricalScore(input.avg_7d_return_post_unlock);
-  const regime_mult = REGIME_MULT[input.market_regime] ?? 1.0;
-  const behavioral = input.behavioral_multiplier;
+  const unlockComponent = Math.min(100, Math.max(0, input.percent_circulating_supply * 2));
+  const liquidityComponent = Math.min(100, Math.max(0, input.percent_volume));
+  const exchangeFlowComponent = Math.min(100, Math.max(0, input.percent_transferred_to_exchanges));
+  const behaviorComponent = Math.min(100, Math.max(0, (input.behavioral_multiplier - 1) * 100));
 
-  const base =
-    size_score + liquidity_score + cohort_score + historical_score;
-  const adjusted = base * regime_mult * behavioral;
-  const score = Math.min(100, Math.max(0, Math.round(adjusted)));
-  const risk_level = getRiskLevel(score);
+  const score = Math.round(
+    unlockComponent * W_UNLOCK +
+    liquidityComponent * W_LIQUIDITY +
+    exchangeFlowComponent * W_EXCHANGE_FLOW +
+    behaviorComponent * W_BEHAVIOR
+  );
+  const clampedScore = Math.min(100, Math.max(0, score));
+  const risk_level = getRiskLevel(clampedScore);
 
-  const explanation = buildExplanation(input, score, risk_level, {
-    size: size_score,
-    liquidity: liquidity_score,
-    cohort: cohort_score,
-    historical: historical_score,
-    behavioral,
-  });
+  const components = [
+    { name: "unlock_percent_circulating", value: unlockComponent },
+    { name: "liquidity_ratio", value: liquidityComponent },
+    { name: "exchange_flow_ratio", value: exchangeFlowComponent },
+    { name: "behavior_multiplier", value: behaviorComponent },
+  ];
+  const primary = components.reduce((a, b) => (a.value >= b.value ? a : b));
+  const primary_driver = primary.name;
 
-  return { score, risk_level, explanation };
+  const lr = input.liquidity_ratio ?? 0;
+  const sell_pressure_estimate =
+    lr >= 1 ? "Very high" : lr >= 0.5 ? "High" : lr >= 0.2 ? "Moderate" : "Low";
+
+  const explanation = [
+    `Unlock ${input.percent_circulating_supply.toFixed(1)}% circ; liquidity component ${liquidityComponent.toFixed(0)};`,
+    `exchange flow ${input.percent_transferred_to_exchanges.toFixed(1)}%; behavior ${input.behavioral_multiplier.toFixed(2)}.`,
+    `Score ${clampedScore} (${risk_level}). Primary driver: ${primary_driver}.`,
+  ].join(" ");
+
+  return {
+    score: clampedScore,
+    risk_level,
+    explanation,
+    primary_driver,
+    sell_pressure_estimate,
+  };
 }
 
 /**
@@ -167,10 +107,27 @@ export function buildScoringInput(
       : 1;
   const behavioralMultiplier = 1 + percentToExchanges / 100;
 
+  const isLinearVesting =
+    supply.vesting_type === "linear_vesting" || supply.vesting_type === "openzeppelin_token_vesting";
+  const usePredictiveUnlock =
+    isLinearVesting &&
+    supply.expected_vested_24h != null &&
+    supply.expected_vested_24h > 0 &&
+    market.circulating_supply > 0;
+
+  const percentCirculating = usePredictiveUnlock
+    ? (supply.expected_vested_24h! / market.circulating_supply) * 100
+    : market.circulating_supply > 0
+      ? (supply.real_sellable_supply / market.circulating_supply) * 100
+      : supply.claimed_amount > 0
+        ? (supply.real_sellable_supply / supply.claimed_amount) * 10
+        : 0;
+
   return {
-    percent_circulating_supply: supply.claimed_amount > 0 ? (supply.real_sellable_supply / supply.claimed_amount) * 10 : 0,
+    percent_circulating_supply: Math.min(100, percentCirculating),
     percent_volume: percentVolume,
     percent_transferred_to_exchanges: percentToExchanges,
+    liquidity_ratio: supply.liquidity_ratio,
     liquidity_depth_multiplier: liquidityMultiplier,
     behavioral_multiplier: behavioralMultiplier,
     cohort_type: cohortType,

@@ -27,6 +27,9 @@ export const config = {
   get MARKET_API_KEY(): string {
     return getEnv("MARKET_API_KEY") ?? "";
   },
+  get COINGECKO_API_KEY(): string {
+    return getEnv("COINGECKO_API_KEY") ?? getEnv("MARKET_API_KEY") ?? "";
+  },
   get PORT(): number {
     const p = getEnv("PORT");
     return p ? Number(p) : 3000;

@@ -13,6 +13,24 @@ export interface TokenMetadata {
   vesting_end: Date | null;
   release_frequency: string | null;
   last_verified_block: string | null;
+  vesting_type?: string | null;
+  chain_id?: string;
+}
+
+export interface VestingAnalysisRow {
+  token_symbol: string;
+  contract_address: string;
+  vesting_type: string | null;
+  expected_vested: number;
+  claimed_amount: number;
+  remaining_locked: number;
+  next_unlock_estimate: number | null;
+  last_updated: Date;
+  vesting_rate_per_second: number | null;
+  accelerated_claim: boolean;
+  unlock_density: number | null;
+  vesting_confidence: number;
+  chain_id?: string;
 }
 
 export interface UnlockEvent {
@@ -27,6 +45,15 @@ export interface UnlockEvent {
   timestamp: Date | null;
 }
 
+export type ExchangeClusterType = "cex" | "hot_wallet" | "deposit_router";
+
+export interface ExchangeCluster {
+  clusterTag: string;
+  label: string;
+  addresses: string[];
+  clusterType: ExchangeClusterType;
+}
+
 export interface UnlockFlow {
   token_symbol: string;
   unlock_event_id: string;
@@ -38,18 +65,41 @@ export interface UnlockFlow {
   exchange_inflow: number;
   retained_amount: number;
   analyzed_at: Date | null;
+  high_velocity: boolean;
+  suspected_hot_wallet: boolean;
+  cluster_tag: string | null;
+  velocity_score: number;
+  cluster_concentration_ratio: number | null;
+  routed_to_exchange: boolean;
+  chain_id?: string;
 }
 
 export interface MarketSnapshot {
   token_symbol: string;
-  avg_30d_volume_usd: number;
   price_usd: number;
+  circulating_supply: number;
+  avg_30d_volume_usd: number;
   market_cap_usd: number;
   liquidity_depth_usd: number;
   fetched_at: string;
 }
 
 export type RiskLevel = "low" | "moderate" | "high" | "extreme";
+
+export interface ChainReport {
+  next_unlock_date: string;
+  unlock_amount: number;
+  unlock_percent_supply: number;
+  risk_level: RiskLevel;
+  score_numeric: number;
+  sellable_supply: {
+    scheduled_amount: number;
+    claimed_amount: number;
+    retained_amount: number;
+    exchange_inflow: number;
+    real_sellable_supply: number;
+  };
+}
 
 export interface IntelligenceReport {
   token_symbol: string;
@@ -64,6 +114,8 @@ export interface IntelligenceReport {
   risk_summary: string;
   score_numeric: number;
   explanation: string;
+  primary_driver: string;
+  sell_pressure_estimate: string;
   sellable_supply: {
     scheduled_amount: number;
     claimed_amount: number;
@@ -72,6 +124,10 @@ export interface IntelligenceReport {
     real_sellable_supply: number;
   };
   fetched_at: string;
+  /** Multi-chain: per-chain reports when available */
+  chains?: Record<string, ChainReport>;
+  /** Multi-chain: aggregated score across chains (optional weighting) */
+  combined_score?: number;
 }
 
 export type RawChainLog = {
@@ -79,12 +135,22 @@ export type RawChainLog = {
   transactionHash: string;
   topics: string[];
   data: string;
+  /** Log index within the block (for deduplication and deterministic ordering). */
+  logIndex?: number;
 };
 
 export type RawChainBlock = {
   number: number;
   timestamp: number;
 };
+
+export interface TokenTransfer {
+  from: string;
+  to: string;
+  value: string;
+  blockNumber: number;
+  txHash: string;
+}
 
 export interface ChainProvider {
   getLogs(
@@ -93,15 +159,32 @@ export interface ChainProvider {
     toBlock: number
   ): Promise<RawChainLog[]>;
   getBlock(blockNumber: number): Promise<RawChainBlock | null>;
+  getTokenTransfers?(
+    tokenAddress: string,
+    fromBlock: number,
+    toBlock: number
+  ): Promise<TokenTransfer[]>;
+  /** Optional: eth_call for vesting contract detection (to, data hex). Returns hex result or "0x" on failure. */
+  call?(to: string, data: string): Promise<string>;
 }
 
 export interface MarketDataProvider {
   getMarketSnapshot(tokenSymbol: string): Promise<MarketSnapshot>;
 }
 
+export interface ExchangeInfo {
+  isExchange: boolean;
+  exchangeLabel?: string;
+  clusterTag?: string;
+}
+
 export interface ExchangeRegistry {
   isKnownExchangeAddress(address: string): boolean;
+  isExchangeAddress(address: string): boolean;
   getExchangeLabel(address: string): string | null;
+  getExchangeInfo(address: string, chainId?: string): ExchangeInfo;
+  /** Cluster-level: get cluster by tag (address → clusterTag, clusterTag → cluster). */
+  getCluster?(clusterTag: string): ExchangeCluster | null;
 }
 
 export type UnlockEventType = "claim" | "transfer" | "vest";

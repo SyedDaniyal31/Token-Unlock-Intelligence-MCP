@@ -1,0 +1,20 @@
+{
+  "Binance": {
+    "addresses": ["0x0000000000000000000000000000000000000001", "0x0000000000000000000000000000000000000002"],
+    "clusterTag": "binance_cluster",
+    "clusterType": "cex",
+    "label": "Binance"
+  },
+  "Coinbase": {
+    "addresses": ["0x0000000000000000000000000000000000000003"],
+    "clusterTag": "coinbase_cluster",
+    "clusterType": "cex",
+    "label": "Coinbase"
+  },
+  "SuspectedHotWallet": {
+    "addresses": [],
+    "clusterTag": "suspected_exchange_hot_wallet",
+    "clusterType": "hot_wallet",
+    "label": "Suspected Hot Wallet"
+  }
+}

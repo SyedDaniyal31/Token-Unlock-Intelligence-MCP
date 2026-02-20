@@ -1,0 +1,14 @@
+{
+  "token_symbol": "TOKEN",
+  "contract_address": "0x1234567890123456789012345678901234567890",
+  "vesting_type": "openzeppelin_token_vesting",
+  "expected_vested": 250000,
+  "claimed_amount": 240000,
+  "remaining_locked": 760000,
+  "next_unlock_estimate": 10000,
+  "last_updated": "2025-02-19T14:00:00.000Z",
+  "vesting_rate_per_second": 0.1157,
+  "accelerated_claim": false,
+  "unlock_density": 2500,
+  "vesting_confidence": 1
+}

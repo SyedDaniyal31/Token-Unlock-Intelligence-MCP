@@ -43,14 +43,17 @@ export async function generateUnlockIntelligence(
         event_type: event.event_type,
         amount: event.amount,
         recipient_address: event.recipient_address,
+        block_number: event.block_number ?? undefined,
+        timestamp: event.timestamp ?? undefined,
+        chain_id: event.chain_id ?? undefined,
       },
       deps.exchangeRegistry
     );
     await markEventProcessed(event.id);
   }
 
-  const supply = await computeSellableSupply(symbol);
   const market = await deps.marketProvider.getMarketSnapshot(symbol);
+  const supply = await computeSellableSupply(symbol, market.avg_30d_volume_usd);
   const cohortType = metadata?.beneficiary_label ?? "ecosystem";
   const scoringInput = buildScoringInput(
     symbol,
@@ -86,6 +89,8 @@ export async function generateUnlockIntelligence(
     risk_summary: scoring.explanation,
     score_numeric: scoring.score,
     explanation: scoring.explanation,
+    primary_driver: scoring.primary_driver,
+    sell_pressure_estimate: scoring.sell_pressure_estimate,
     sellable_supply: toReportSellableSupply(supply),
     fetched_at: new Date().toISOString(),
   };

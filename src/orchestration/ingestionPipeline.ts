@@ -47,6 +47,9 @@ export async function runFullIngestionCycle(deps: IngestionPipelineDeps): Promis
             event_type: event.event_type,
             amount: event.amount,
             recipient_address: event.recipient_address,
+            block_number: event.block_number ?? undefined,
+            timestamp: event.timestamp ?? undefined,
+            chain_id: event.chain_id ?? undefined,
           },
           deps.exchangeRegistry
         );
@@ -77,13 +80,18 @@ export async function runFullIngestionCycle(deps: IngestionPipelineDeps): Promis
             ? supply.real_sellable_supply / avg30d
             : 0;
 
+        const denominator = (supply.expected_vested != null && supply.expected_vested > 0)
+          ? supply.expected_vested
+          : supply.scheduled_amount;
+        const unlockPercentSupply = denominator > 0
+          ? (supply.real_sellable_supply / denominator) * 100
+          : 0;
+
         await query(UPSERT_ANALYSIS_SQL, [
           tokenSymbol,
           nextUnlock,
           supply.real_sellable_supply,
-          supply.scheduled_amount > 0
-            ? (supply.real_sellable_supply / supply.scheduled_amount) * 100
-            : 0,
+          unlockPercentSupply,
           avg30d,
           ratio,
           cohortType,

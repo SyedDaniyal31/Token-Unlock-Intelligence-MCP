@@ -11,14 +11,31 @@ import { config } from "./core/config.js";
 import logger from "./core/logger.js";
 import { closePool } from "./infrastructure/database/postgres.js";
 import { MockEthereumProvider } from "./infrastructure/rpc/ethereumProvider.js";
-import { StubMarketProvider } from "./infrastructure/market/marketProvider.js";
+import { EthereumRpcProvider } from "./infrastructure/rpc/ethereumRpcProvider.js";
+import { StubMarketProvider, CoinGeckoMarketProvider } from "./infrastructure/market/marketProvider.js";
+import { CachingMarketProvider } from "./infrastructure/market/marketCache.js";
 import { DefaultExchangeRegistry } from "./infrastructure/exchanges/exchangeRegistry.js";
 import { registerHealthRoute, registerIntelligenceRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
+import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
 import { runUnlockPrecompute } from "./broker.js";
 
-const chainProvider = new MockEthereumProvider();
-const marketProvider = new StubMarketProvider();
+const rpcUrl = (config.RPC_URL || process.env.RPC_URL || "").trim();
+const chainProvider =
+  rpcUrl
+    ? (() => {
+        try {
+          return new EthereumRpcProvider(rpcUrl);
+        } catch (err) {
+          logger.warn({ err: err instanceof Error ? err.message : String(err) }, "EthereumRpcProvider init failed; using mock");
+          return new MockEthereumProvider();
+        }
+      })()
+    : new MockEthereumProvider();
+const baseMarketProvider = config.COINGECKO_API_KEY
+  ? new CoinGeckoMarketProvider(config.COINGECKO_API_KEY)
+  : new StubMarketProvider();
+const marketProvider = new CachingMarketProvider(baseMarketProvider);
 const exchangeRegistry = new DefaultExchangeRegistry();
 
 const deps = {
@@ -186,7 +203,8 @@ app.use((err: Error, _req: Request, res: Response, _next: () => void): void => {
 let httpServer: Server | null = null;
 
 const precomputeCron = cron.schedule("0 */6 * * *", () => {
-  runFullIngestionCycle(deps)
+  syncUnlockRegistryToDb()
+    .then(() => runFullIngestionCycle(deps))
     .then(() => runUnlockPrecompute())
     .catch((err: Error) => {
       logger.error({ err, scope: "cron" }, "Ingestion cron error");
@@ -196,7 +214,8 @@ const precomputeCron = cron.schedule("0 */6 * * *", () => {
 export function start(port: number): Server {
   httpServer = app.listen(port, (): void => {
     logger.info({ port }, "Server listening");
-    runFullIngestionCycle(deps)
+    syncUnlockRegistryToDb()
+      .then(() => runFullIngestionCycle(deps))
       .then(() => runUnlockPrecompute())
       .catch((err: Error) => {
         logger.error({ err }, "Initial ingestion cycle error");

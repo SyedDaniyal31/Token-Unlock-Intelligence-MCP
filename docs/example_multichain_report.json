@@ -1,0 +1,51 @@
+{
+  "token_symbol": "ABC",
+  "next_unlock_date": "2025-12-31",
+  "unlock_amount": 5000000,
+  "unlock_percent_supply": 2.5,
+  "unlock_vs_volume_ratio": 0.8,
+  "cohort_type": "team",
+  "impact_score": "72",
+  "risk_level": "high",
+  "risk_summary": "Multi-chain sellable supply; Ethereum and Arbitrum flows.",
+  "score_numeric": 72,
+  "combined_score": 72,
+  "chains": {
+    "ethereum": {
+      "next_unlock_date": "2025-12-31",
+      "unlock_amount": 3000000,
+      "unlock_percent_supply": 1.5,
+      "risk_level": "high",
+      "score_numeric": 70,
+      "sellable_supply": {
+        "scheduled_amount": 3000000,
+        "claimed_amount": 2800000,
+        "retained_amount": 500000,
+        "exchange_inflow": 2300000,
+        "real_sellable_supply": 2300000
+      }
+    },
+    "arbitrum": {
+      "next_unlock_date": "2025-12-31",
+      "unlock_amount": 2000000,
+      "unlock_percent_supply": 1.0,
+      "risk_level": "moderate",
+      "score_numeric": 55,
+      "sellable_supply": {
+        "scheduled_amount": 2000000,
+        "claimed_amount": 1800000,
+        "retained_amount": 400000,
+        "exchange_inflow": 1400000,
+        "real_sellable_supply": 1400000
+      }
+    }
+  },
+  "sellable_supply": {
+    "scheduled_amount": 5000000,
+    "claimed_amount": 4600000,
+    "retained_amount": 900000,
+    "exchange_inflow": 3700000,
+    "real_sellable_supply": 3700000
+  },
+  "fetched_at": "2025-02-19T16:00:00.000Z"
+}

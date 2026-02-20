@@ -1,0 +1,35 @@
+[
+  {
+    "token_symbol": "ARB",
+    "contract_address": "0x0000000000000000000000000000000000000000",
+    "vesting_contract": "0x0000000000000000000000000000000000000000",
+    "beneficiary_type": "team",
+    "total_allocation": 1000000000,
+    "vesting_start": "2024-01-01T00:00:00.000Z",
+    "vesting_cliff": "2024-06-01T00:00:00.000Z",
+    "vesting_end": "2025-12-31T00:00:00.000Z",
+    "release_frequency": "monthly"
+  },
+  {
+    "token_symbol": "OP",
+    "contract_address": "0x0000000000000000000000000000000000000000",
+    "vesting_contract": "0x0000000000000000000000000000000000000000",
+    "beneficiary_type": "ecosystem",
+    "total_allocation": 500000000,
+    "vesting_start": "2024-01-01T00:00:00.000Z",
+    "vesting_cliff": null,
+    "vesting_end": "2025-06-30T00:00:00.000Z",
+    "release_frequency": "monthly"
+  },
+  {
+    "token_symbol": "APT",
+    "contract_address": "0x0000000000000000000000000000000000000000",
+    "vesting_contract": "0x0000000000000000000000000000000000000000",
+    "beneficiary_type": "team",
+    "total_allocation": 1000000000,
+    "vesting_start": "2023-01-01T00:00:00.000Z",
+    "vesting_cliff": "2023-06-01T00:00:00.000Z",
+    "vesting_end": "2026-01-01T00:00:00.000Z",
+    "release_frequency": "monthly"
+  }
+]

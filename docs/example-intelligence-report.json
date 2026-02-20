@@ -8,9 +8,11 @@
   "historical_avg_7d_return": -3,
   "impact_score": "moderate",
   "risk_level": "moderate",
-  "risk_summary": "Unlock represents 4.5% of circulating supply. Liquidity score component: 15. Cohort (vc): 18. Historical 7d return post-unlock: -3%. Behavioral multiplier: 1.00. Final score: 52 (moderate risk).",
+  "risk_summary": "Unlock 4.5% circ; liquidity component 15; exchange flow 0.0%; behavior 1.00. Score 52 (moderate). Primary driver: liquidity_ratio.",
   "score_numeric": 52,
-  "explanation": "Unlock represents 4.5% of circulating supply. Liquidity score component: 15. Cohort (vc): 18. Historical 7d return post-unlock: -3%. Behavioral multiplier: 1.00. Final score: 52 (moderate risk).",
+  "explanation": "Unlock 4.5% circ; liquidity component 15; exchange flow 0.0%; behavior 1.00. Score 52 (moderate). Primary driver: liquidity_ratio.",
+  "primary_driver": "liquidity_ratio",
+  "sell_pressure_estimate": "Moderate",
   "sellable_supply": {
     "scheduled_amount": 125000000,
     "claimed_amount": 125000000,
