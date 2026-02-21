@@ -60,10 +60,14 @@ function loadChainsConfig(): ChainsConfig {
 }
 
 function resolveRpcUrl(chainKey: string, config?: { rpcUrl: string }): string {
-  const envKey = config?.rpcUrl ?? ENV_MAP[chainKey.toLowerCase()] ?? `${chainKey.toUpperCase()}_RPC_URL`;
-  const fromEnv = process.env[envKey];
-  if (fromEnv && typeof fromEnv === "string" && fromEnv.trim()) return fromEnv.trim();
   if (config?.rpcUrl && config.rpcUrl.startsWith("http")) return config.rpcUrl.trim();
+  const key = chainKey.toLowerCase();
+  const envKey = ENV_MAP[key] ?? `${chainKey.toUpperCase()}_RPC_URL`;
+  let fromEnv = process.env[envKey];
+  if (key === "ethereum" && (!fromEnv || !String(fromEnv).trim())) {
+    fromEnv = process.env.RPC_URL;
+  }
+  if (fromEnv && typeof fromEnv === "string" && fromEnv.trim()) return fromEnv.trim();
   return "";
 }
 
@@ -106,7 +110,7 @@ export function getChainProvider(chainIdOrName: ChainId): ChainProvider {
   const rpcUrl = resolveRpcUrl(chainKey, chainConfig);
 
   if (!rpcUrl) {
-    logger.warn({ chainKey }, "No RPC URL for chain; using mock provider");
+    logger.warn({ chainKey }, "RPC not configured for chain — using MockEthereumProvider");
     const mock = new MockEthereumProvider();
     providerCache.set(chainKey, mock);
     return mock;
@@ -133,6 +137,26 @@ export function getConfiguredChains(): string[] {
   if (process.env.ARB_RPC_URL) return ["arbitrum"];
   if (process.env.BSC_RPC_URL) return ["bsc"];
   return [DEFAULT_CHAIN];
+}
+
+/**
+ * Returns which chains have an RPC URL configured (for diagnostics).
+ */
+export function getRpcConfigured(): Record<string, boolean> {
+  const config = getConfig();
+  const chains = getConfiguredChains();
+  const out: Record<string, boolean> = {};
+  for (const c of chains) {
+    const chainConfig = config.chains[c] ?? config.chains[c.toLowerCase()];
+    out[c] = resolveRpcUrl(c, chainConfig).length > 0;
+  }
+  const defaults = ["ethereum", "arbitrum", "bsc"];
+  for (const c of defaults) {
+    if (out[c] === undefined) {
+      out[c] = resolveRpcUrl(c, config.chains[c]).length > 0;
+    }
+  }
+  return out;
 }
 
 /**

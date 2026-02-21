@@ -15,7 +15,9 @@ import { EthereumRpcProvider } from "./infrastructure/rpc/ethereumRpcProvider.js
 import { StubMarketProvider, CoinGeckoMarketProvider } from "./infrastructure/market/marketProvider.js";
 import { CachingMarketProvider } from "./infrastructure/market/marketCache.js";
 import { DefaultExchangeRegistry } from "./infrastructure/exchanges/exchangeRegistry.js";
-import { registerHealthRoute, registerIntelligenceRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
+import { registerHealthRoute, registerIntelligenceRoute, registerDiagnosticsRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
+import { requestIdMiddleware } from "./middleware/requestId.js";
+import { errorHandler } from "./middleware/errorHandler.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
 import { runUnlockPrecompute } from "./broker.js";
@@ -46,6 +48,7 @@ const deps = {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+app.use(requestIdMiddleware);
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -56,6 +59,7 @@ app.use(
 );
 
 registerHealthRoute(app);
+registerDiagnosticsRoute(app);
 registerIntelligenceRoute(app, deps);
 
 app.use("/mcp", createContextMiddleware());
@@ -168,15 +172,73 @@ mcpServer.connect(transport).catch((err: Error) => {
 });
 
 app.post("/mcp", async (req: Request, res: Response): Promise<void> => {
+  const body = req.body as unknown;
+  const id = body && typeof body === "object" && "id" in body ? (body as { id: unknown }).id : null;
+  if (!body || typeof body !== "object") {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32700, message: "Parse error" },
+    });
+    return;
+  }
+  const b = body as { jsonrpc?: string; method?: string; params?: { name?: string; arguments?: unknown }; id?: unknown };
+  if (b.jsonrpc !== "2.0") {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      id: b.id ?? null,
+      error: { code: -32600, message: "Invalid Request" },
+    });
+    return;
+  }
+  if (b.method === "tools/call") {
+    if (!b.params || typeof b.params !== "object") {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: b.id ?? null,
+        error: { code: -32602, message: "Invalid params" },
+      });
+      return;
+    }
+    if (!b.params.name || typeof b.params.name !== "string") {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: b.id ?? null,
+        error: { code: -32602, message: "Invalid params: name required" },
+      });
+      return;
+    }
+    if (!b.params.arguments || typeof b.params.arguments !== "object") {
+      res.status(400).json({
+        jsonrpc: "2.0",
+        id: b.id ?? null,
+        error: { code: -32602, message: "Invalid params: arguments required" },
+      });
+      return;
+    }
+    const args = b.params.arguments as Record<string, unknown>;
+    if (b.params.name === "analyze_token_unlock") {
+      const tokenSymbolVal = (args.token_symbol ?? args.tokenSymbol) ?? "";
+      if (!tokenSymbolVal || typeof tokenSymbolVal !== "string" || !String(tokenSymbolVal).trim()) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          id: b.id ?? null,
+          error: { code: -32602, message: "Invalid params: token_symbol required" },
+        });
+        return;
+      }
+    }
+  }
   try {
-    await transport.handleRequest(req, res, req.body);
+    await transport.handleRequest(req, res, body);
   } catch (err) {
     logger.error({ err }, "MCP POST error");
     if (!res.headersSent) {
+      const replyId = (body as { id?: unknown }).id ?? null;
       res.status(500).json({
         jsonrpc: "2.0",
         error: { code: -32603, message: "Internal server error" },
-        id: null,
+        id: replyId,
       });
     }
   }
@@ -193,12 +255,7 @@ app.get("/mcp", async (req: Request, res: Response): Promise<void> => {
   }
 });
 
-app.use((err: Error, _req: Request, res: Response, _next: () => void): void => {
-  logger.error({ err }, "Unhandled error");
-  if (!res.headersSent) {
-    res.status(500).json({ error: "internal_error" });
-  }
-});
+app.use(errorHandler);
 
 let httpServer: Server | null = null;
 

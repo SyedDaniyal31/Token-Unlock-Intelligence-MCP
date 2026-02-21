@@ -3,6 +3,7 @@ import { config } from "./core/config.js";
 import { start, shutdown } from "./app.js";
 import { runMigrations } from "./infrastructure/db/runMigrations.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
+import { getConfiguredChains } from "./infrastructure/rpc/chainProviderFactory.js";
 import logger from "./core/logger.js";
 
 function validateProductionEnv(): void {
@@ -14,23 +15,30 @@ function validateProductionEnv(): void {
     process.exit(1);
   }
 
-  const hasRpc = process.env.RPC_URL && String(process.env.RPC_URL).trim().length > 0;
-  if (!hasRpc) {
-    logger.fatal("RPC_URL is required in production. Railway: Project → Variables → add RPC_URL.");
+  const hasAnyRpc =
+    (process.env.RPC_URL && String(process.env.RPC_URL).trim().length > 0) ||
+    (process.env.ETH_RPC_URL && String(process.env.ETH_RPC_URL).trim().length > 0) ||
+    (process.env.ARB_RPC_URL && String(process.env.ARB_RPC_URL).trim().length > 0) ||
+    (process.env.BSC_RPC_URL && String(process.env.BSC_RPC_URL).trim().length > 0);
+  if (!hasAnyRpc) {
+    logger.fatal(
+      "At least one RPC provider must be configured in production. Set RPC_URL, ETH_RPC_URL, ARB_RPC_URL, or BSC_RPC_URL."
+    );
     process.exit(1);
   }
 }
 
 async function bootstrap(): Promise<void> {
+  validateProductionEnv();
+  const chains = getConfiguredChains();
   logger.info(
     {
       NODE_ENV: process.env.NODE_ENV ?? "development",
       hasDatabase: Boolean(process.env.DATABASE_URL?.trim()),
-      hasRpc: Boolean(process.env.RPC_URL?.trim()),
+      chains_configured: chains,
     },
     "Starting bootstrap"
   );
-  validateProductionEnv();
 
   try {
     await runMigrations();

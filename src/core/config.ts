@@ -22,7 +22,7 @@ export const config = {
     return requireInProduction("DATABASE_URL") || (getEnv("DATABASE_URL") ?? "");
   },
   get RPC_URL(): string {
-    return requireInProduction("RPC_URL") || (getEnv("RPC_URL") ?? "");
+    return getEnv("RPC_URL") ?? getEnv("ETH_RPC_URL") ?? "";
   },
   get MARKET_API_KEY(): string {
     return getEnv("MARKET_API_KEY") ?? "";

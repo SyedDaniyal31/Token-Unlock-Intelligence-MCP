@@ -58,23 +58,32 @@ Rollback: redeploy a previous revision; migrations are safe to re-run.
 
 ## Endpoints
 
-- **GET /health** — `{ status, db, chains_configured, uptime_seconds, timestamp }`.
-- **POST /intelligence** — Body: `{ token_symbol: "ARB" }` or `{ query: "..." }`. Returns full `IntelligenceReport`.
-- **POST /mcp** — JSON-RPC; tool `analyze_token_unlock` with `token_symbol`. Context Protocol middleware may require `Authorization: Bearer <JWT>` for tool calls.
+- **GET /health** — `{ status, db, registry_loaded, chains_configured, uptime_seconds, timestamp }`. DB and registry are checked.
+- **GET /diagnostics** — `{ registry_tokens, db_tokens, chains_configured, rpc_configured }` for debugging without logs.
+- **POST /intelligence** — Body: `{ token_symbol: "ARB" }` or `{ tokenSymbol: "ARB" }`. Returns full `IntelligenceReport`. **404** `{ error: "token_not_found" }` when the token has no unlock schedule in the registry.
+- **POST /mcp** — JSON-RPC; validates `jsonrpc`, `method`, `params.name`, `params.arguments`; for `analyze_token_unlock`, `token_symbol` is required. Invalid requests return JSON-RPC error (e.g. -32602), not 500.
 
 ## Test with cURL
 
+**Health**
 ```bash
-# Health
-curl -s http://localhost:3000/health | jq
-
-# Intelligence (REST)
-curl -s -X POST http://localhost:3000/intelligence -H "Content-Type: application/json" -d '{"token_symbol":"ARB"}' | jq
-
-# MCP tool call (if auth not required)
-curl -s -X POST http://localhost:3000/mcp -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"analyze_token_unlock","arguments":{"token_symbol":"ARB"}}}' | jq
+curl -s https://YOUR_APP.up.railway.app/health
 ```
+
+**REST intelligence** — use `token_symbol` or `tokenSymbol`:
+```bash
+curl -s -X POST https://YOUR_APP.up.railway.app/intelligence \
+  -H "Content-Type: application/json" \
+  -d '{"token_symbol":"ARB"}'
+```
+
+**MCP** — `/mcp` expects JSON-RPC, not a plain body. Use this for the tool call:
+```bash
+curl -s -X POST https://YOUR_APP.up.railway.app/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"analyze_token_unlock","arguments":{"token_symbol":"ARB"}}}'
+```
+On Windows PowerShell use `curl.exe` (or escape quotes). Wrong: `-d '{"tokenSymbol":"ARB"}'` to `/mcp` — that body is for REST; for `/mcp` you must send the JSON-RPC object above.
 
 ## Multi-chain
 
