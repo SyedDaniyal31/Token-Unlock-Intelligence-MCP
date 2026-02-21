@@ -103,6 +103,7 @@ const MCP_TOOLS = [
         token_symbol: {
           type: "string" as const,
           description: "Token ticker symbol (e.g. ETH, ARB)",
+          default: "ARB",
         },
       },
       required: ["token_symbol"] as const,
@@ -148,9 +149,9 @@ mcpServer.setRequestHandler(
   CallToolRequestSchema,
   async (request: CallToolRequest): Promise<CallToolResult> => {
     const { name, arguments: args } = request.params;
-    const tokenSymbol = (args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "")
-      .toString()
-      .trim();
+    const raw =
+      args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "ARB";
+    const tokenSymbol = (typeof raw === "string" ? raw : String(raw ?? "")).trim() || "ARB";
 
     const successResult = (data: AnalyzeTokenUnlockOutput): CallToolResult => ({
       content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -176,19 +177,27 @@ mcpServer.setRequestHandler(
 
     if (name !== "analyze_token_unlock") return errorResult(`Unknown tool: ${name}`);
 
-    if (!tokenSymbol) {
-      return successResult(safeOutput("", "token_symbol is required."));
-    }
+    const symbol = tokenSymbol || "ARB";
+
+    const TOOL_TIMEOUT_MS = 25_000;
 
     try {
-      const report = await getIntelligenceReport(tokenSymbol, deps);
+      const report = await Promise.race([
+        getIntelligenceReport(symbol, deps),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+        ),
+      ]);
       const structuredContent = reportToLegacyShape(report);
       logger.info({ tool: "analyze_token_unlock", token_symbol: report.token_symbol, impact_score: report.impact_score });
       return successResult(structuredContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, message }, "analyze_token_unlock error");
-      return successResult(safeOutput(tokenSymbol, `Unlock analysis failed: ${message}.`));
+      const summary = message.includes("timed out")
+        ? "Analysis timed out; try again or use a different token."
+        : `Unlock analysis failed: ${message}.`;
+      return successResult(safeOutput(symbol, summary));
     }
   }
 );
