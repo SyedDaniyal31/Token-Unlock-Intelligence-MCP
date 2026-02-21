@@ -39,6 +39,17 @@ export function errorHandler(
       ? err.message
       : "Unexpected server error";
 
+  const path = (req.path ?? req.url ?? "").split("?")[0];
+  if (path === "/mcp" && body && typeof body === "object" && "jsonrpc" in body) {
+    const id = (body as { id?: unknown }).id ?? null;
+    res.status(500).json({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32603, message },
+    });
+    return;
+  }
+
   res.status(500).json({
     error: "Internal Server Error",
     message,

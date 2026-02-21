@@ -188,8 +188,9 @@ const transport = new StreamableHTTPServerTransport({
   sessionIdGenerator: undefined,
 });
 
-mcpServer.connect(transport).catch((err: Error) => {
+const mcpConnectPromise = mcpServer.connect(transport).catch((err: Error) => {
   logger.error({ err }, "MCP server connect error");
+  throw err;
 });
 
 app.post(
@@ -258,7 +259,22 @@ app.post(
         }
       }
     }
-    await transport.handleRequest(req, res, body);
+    try {
+      await mcpConnectPromise;
+      await transport.handleRequest(req, res, body);
+    } catch (err) {
+      logger.error(
+        { err, method: b.method, id: b.id, message: err instanceof Error ? err.message : String(err) },
+        "MCP transport handleRequest error"
+      );
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          id: b.id ?? null,
+          error: { code: -32603, message: "Internal server error" },
+        });
+      }
+    }
   })
 );
 
