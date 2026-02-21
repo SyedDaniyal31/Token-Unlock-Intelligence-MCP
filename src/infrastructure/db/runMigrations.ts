@@ -63,8 +63,10 @@ function loadSql(filePath: string): string {
 }
 
 /**
- * Execute all migrations in order inside a single transaction.
- * On failure: rollback and throw (stops app startup).
+ * Execute all migrations in order. Each file runs in its own transaction so a
+ * failure in one file does not leave the connection in "transaction aborted"
+ * state (Postgres does not allow further commands after any error in a txn).
+ * On failure: rollback that file's txn and throw (stops app startup).
  */
 export async function runMigrations(): Promise<void> {
   const connectionString = getDatabaseUrl();
@@ -75,12 +77,10 @@ export async function runMigrations(): Promise<void> {
 
   await client.connect();
 
+  const migrationRoot = getMigrationRoot();
+  logger.info({ migrationRoot }, "Migration root resolved");
+
   try {
-    await client.query("BEGIN");
-
-    const migrationRoot = getMigrationRoot();
-    logger.info({ migrationRoot }, "Migration root resolved");
-
     for (let i = 0; i < MIGRATION_ORDER.length; i++) {
       const relativePath = MIGRATION_ORDER[i];
       const absolutePath = resolveSqlPath(relativePath);
@@ -104,30 +104,24 @@ export async function runMigrations(): Promise<void> {
         .map((s) => s.replace(/^\s*--[^\n]*\n?/gm, "").trim())
         .filter((s) => s.length > 0);
 
-      for (const statement of statements) {
-        const one = statement.endsWith(";") ? statement : statement + ";";
-        try {
+      await client.query("BEGIN");
+      try {
+        for (const statement of statements) {
+          const one = statement.endsWith(";") ? statement : statement + ";";
           await client.query(one);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("already exists") || msg.includes("duplicate key")) {
-            logger.debug({ migration: name }, "Object already exists (idempotent)");
-          } else {
-            throw err;
-          }
         }
+        await client.query("COMMIT");
+      } catch (fileErr) {
+        await client.query("ROLLBACK").catch(() => {});
+        const message = fileErr instanceof Error ? fileErr.message : String(fileErr);
+        logger.error({ err: fileErr, migration: name, message }, "Migration file failed");
+        throw new Error(`Migrations failed (${name}): ${message}`);
       }
 
       logger.info({ migration: name }, "Migration applied");
     }
 
-    await client.query("COMMIT");
     logger.info("All migrations completed successfully");
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message }, "CRITICAL: Migrations failed");
-    throw new Error(`Migrations failed: ${message}`);
   } finally {
     await client.end();
   }
