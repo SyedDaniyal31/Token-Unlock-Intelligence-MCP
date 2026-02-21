@@ -2,14 +2,25 @@ import type { Request, Response } from "express";
 import { getIntelligenceReport, extractTokenFromQuery, reportToLegacyShape } from "./mcpController.js";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import logger from "../core/logger.js";
+import { query } from "../infrastructure/database/postgres.js";
+import { getConfiguredChains } from "../infrastructure/rpc/chainProviderFactory.js";
 
 export function registerHealthRoute(
-  app: { get: (path: string, handler: (req: Request, res: Response) => void) => void }
+  app: { get: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void }
 ): void {
-  app.get("/health", (_req: Request, res: Response): void => {
+  app.get("/health", async (_req: Request, res: Response): Promise<void> => {
+    let db: "connected" | "error" = "error";
+    try {
+      await query("SELECT 1");
+      db = "connected";
+    } catch {
+      db = "error";
+    }
     res.json({
-      status: "ok",
-      uptime: process.uptime(),
+      status: db === "connected" ? "ok" : "degraded",
+      db,
+      chains_configured: getConfiguredChains(),
+      uptime_seconds: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
     });
   });
