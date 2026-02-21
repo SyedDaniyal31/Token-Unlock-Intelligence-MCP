@@ -56,6 +56,20 @@ registerDiagnosticsRoute(app);
 registerMarketRoute(app);
 registerIntelligenceRoute(app, deps);
 
+app.get("/", (_req: Request, res: Response): void => {
+  res.status(200).json({
+    name: "token-unlock-intelligence-mcp",
+    status: "ok",
+    endpoints: {
+      health: "/health",
+      diagnostics: "/diagnostics",
+      intelligence: "POST /intelligence",
+      market: "GET /market",
+      mcp: "POST /mcp",
+    },
+  });
+});
+
 app.use("/mcp", createContextMiddleware());
 
 const mcpServer = new McpServer({
@@ -244,7 +258,10 @@ app.get("/mcp", async (req: Request, res: Response): Promise<void> => {
   } catch (err) {
     logger.error({ err }, "MCP GET error");
     if (!res.headersSent) {
-      res.status(500).send("Internal server error");
+      res.status(200).json({
+        message: "MCP endpoint. Use POST with JSON-RPC 2.0 for tool calls.",
+        endpoint: "/mcp",
+      });
     }
   }
 });
