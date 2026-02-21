@@ -15,6 +15,10 @@ export interface UnlockRegistryEntry {
   release_frequency: string;
   /** Chain key: ethereum | arbitrum | bsc (default ethereum) */
   chain_id?: string;
+  /** CoinGecko coin id (e.g. arbitrum, ethereum). */
+  coingecko_id?: string | null;
+  /** CoinPaprika ticker id (e.g. arb-arbitrum, eth-ethereum). */
+  paprika_id?: string | null;
 }
 
 function getRegistryPath(): string {
@@ -59,6 +63,8 @@ export async function syncUnlockRegistryToDb(): Promise<number> {
         vesting_end: e.vesting_end ? new Date(e.vesting_end) : null,
         release_frequency: e.release_frequency ?? null,
         chain_id: e.chain_id ?? "ethereum",
+        coingecko_id: e.coingecko_id ?? null,
+        paprika_id: e.paprika_id ?? null,
       });
       synced++;
     } catch (err) {

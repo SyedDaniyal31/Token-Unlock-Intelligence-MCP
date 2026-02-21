@@ -3,6 +3,7 @@ import type {
   MarketDataProvider,
   ExchangeRegistry,
   IntelligenceReport,
+  MarketSnapshot,
   RiskLevel,
   ChainReport,
 } from "../core/types.js";
@@ -15,12 +16,25 @@ import {
   buildScoringInput,
   type ScoringOutput,
 } from "./impactScoring.js";
+import { getMarketData } from "../market/MarketAggregator.js";
 import logger from "../core/logger.js";
 
 export interface UnlockIntelligenceDeps {
   chainProvider: ChainProvider;
   marketProvider: MarketDataProvider;
   exchangeRegistry: ExchangeRegistry;
+}
+
+function normalizedToSnapshot(symbol: string, raw: { price: number; marketCap: number; volume24h: number; circulatingSupply: number }): MarketSnapshot {
+  return {
+    token_symbol: symbol,
+    price_usd: Number(raw.price) || 0,
+    circulating_supply: Number(raw.circulatingSupply) || 0,
+    avg_30d_volume_usd: Number(raw.volume24h) || 0,
+    market_cap_usd: Number(raw.marketCap) || 0,
+    liquidity_depth_usd: 0,
+    fetched_at: new Date().toISOString(),
+  };
 }
 
 function riskLevelToScoreString(risk: RiskLevel): string {
@@ -102,21 +116,12 @@ export async function generateUnlockIntelligence(
     logger.warn({ err, stage: "get_events", token_symbol: symbol }, "Stage failed");
   }
 
-  let market: Awaited<ReturnType<MarketDataProvider["getMarketSnapshot"]>>;
-  try {
-    market = await deps.marketProvider.getMarketSnapshot(symbol);
-  } catch (err) {
-    logger.warn({ err, stage: "market_snapshot", token_symbol: symbol }, "Stage failed");
-    market = {
-      token_symbol: symbol,
-      price_usd: 0,
-      circulating_supply: 0,
-      avg_30d_volume_usd: 0,
-      market_cap_usd: 0,
-      liquidity_depth_usd: 0,
-      fetched_at: new Date().toISOString(),
-    };
-  }
+  const raw = await getMarketData(
+    symbol,
+    metadata?.coingecko_id,
+    metadata?.paprika_id
+  );
+  const market: MarketSnapshot = normalizedToSnapshot(symbol, raw);
 
   let supply: Awaited<ReturnType<typeof computeSellableSupply>>;
   try {

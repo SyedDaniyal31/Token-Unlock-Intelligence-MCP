@@ -15,6 +15,10 @@ export interface TokenMetadata {
   last_verified_block: string | null;
   vesting_type?: string | null;
   chain_id?: string;
+  /** CoinGecko API coin id (e.g. arbitrum, ethereum). */
+  coingecko_id?: string | null;
+  /** CoinPaprika API ticker id (e.g. arb-arbitrum, eth-ethereum). */
+  paprika_id?: string | null;
 }
 
 export interface VestingAnalysisRow {

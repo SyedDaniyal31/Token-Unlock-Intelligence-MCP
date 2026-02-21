@@ -1,6 +1,5 @@
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
-import rateLimit from "express-rate-limit";
 import cron from "node-cron";
 import { z } from "zod";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
@@ -15,8 +14,9 @@ import { EthereumRpcProvider } from "./infrastructure/rpc/ethereumRpcProvider.js
 import { StubMarketProvider, CoinGeckoMarketProvider } from "./infrastructure/market/marketProvider.js";
 import { CachingMarketProvider } from "./infrastructure/market/marketCache.js";
 import { DefaultExchangeRegistry } from "./infrastructure/exchanges/exchangeRegistry.js";
-import { registerHealthRoute, registerIntelligenceRoute, registerDiagnosticsRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
+import { registerHealthRoute, registerIntelligenceRoute, registerDiagnosticsRoute, registerMarketRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
 import { requestIdMiddleware } from "./middleware/requestId.js";
+import { globalRateLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
@@ -49,17 +49,11 @@ const deps = {
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(requestIdMiddleware);
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 100,
-    standardHeaders: true,
-    legacyHeaders: false,
-  })
-);
+app.use(globalRateLimiter);
 
 registerHealthRoute(app);
 registerDiagnosticsRoute(app);
+registerMarketRoute(app);
 registerIntelligenceRoute(app, deps);
 
 app.use("/mcp", createContextMiddleware());

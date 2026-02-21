@@ -20,6 +20,9 @@ const MIGRATION_ORDER: string[] = [
   "sql/migration_indexes_performance.sql",
   "sql/migration_multichain.sql",
   "sql/migration_flow_high_velocity_suspected.sql",
+  // Market provider IDs and indexes (after unlock_schedules exists; idempotent ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS)
+  "sql/migration_market_ids.sql",
+  "sql/migration_market_indexes.sql",
 ];
 
 function getDatabaseUrl(): string {

@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { z } from "zod";
 import { getIntelligenceReport, extractTokenFromQuery, reportToLegacyShape } from "./mcpController.js";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
@@ -7,6 +8,21 @@ import { query } from "../infrastructure/database/postgres.js";
 import { getConfiguredChains, getRpcConfigured } from "../infrastructure/rpc/chainProviderFactory.js";
 import { loadUnlockRegistryFromDisk } from "../infrastructure/registry/unlockRegistryLoader.js";
 import type { RequestWithId } from "../middleware/requestId.js";
+import {
+  MarketAggregatorService,
+  InvalidTokenIdError,
+  MarketUnavailableError,
+} from "../services/MarketAggregator.js";
+
+/** POST /intelligence body: token_symbol or query required; optional chain_id and market ids. */
+const intelligenceBodySchema = z.object({
+  query: z.string().max(200).optional(),
+  token_symbol: z.string().max(20).regex(/^[A-Z0-9]*$/i).optional(),
+  tokenSymbol: z.string().max(20).regex(/^[A-Z0-9]*$/i).optional(),
+  chain_id: z.number().int().positive().optional(),
+  coingecko_id: z.string().max(64).regex(/^[a-z0-9-]*$/).optional(),
+  paprika_id: z.string().max(64).regex(/^[a-z0-9-]*$/).optional(),
+});
 
 export function registerHealthRoute(
   app: { get: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void }
@@ -69,12 +85,25 @@ export function registerIntelligenceRoute(
   app.post("/intelligence", async (req: Request & RequestWithId, res: Response): Promise<void> => {
     const requestId = req.request_id ?? "";
     try {
-      const queryParam = (req.body?.query as string) ?? "";
-      const tokenFromBody =
-        (req.body?.token_symbol as string) ?? (req.body?.tokenSymbol as string) ?? "";
-      const tokenSymbol = (tokenFromBody.trim() || extractTokenFromQuery(queryParam) || "").toUpperCase();
+      const parseResult = intelligenceBodySchema.safeParse(req.body ?? {});
+      if (!parseResult.success) {
+        const issues = parseResult.error.flatten().fieldErrors;
+        res.status(400).json({
+          error: "validation_error",
+          message: "Request body validation failed",
+          details: issues,
+        });
+        return;
+      }
+      const body = parseResult.data;
+      const tokenFromBody = (body.token_symbol ?? body.tokenSymbol ?? "").trim().toUpperCase();
+      const queryParam = body.query ?? "";
+      const tokenSymbol = tokenFromBody || extractTokenFromQuery(queryParam) || "";
       if (!tokenSymbol) {
-        res.status(400).json({ error: "token_symbol or query required" });
+        res.status(400).json({
+          error: "token_symbol or query required",
+          message: "Provide token_symbol, tokenSymbol, or query to derive a token symbol",
+        });
         return;
       }
       const schedule = await getScheduleByToken(tokenSymbol);
@@ -89,6 +118,62 @@ export function registerIntelligenceRoute(
       logger.error({ err, request_id: requestId, route: "/intelligence" }, "intelligence route error");
       if (!res.headersSent) {
         res.status(500).json({ error: "internal_error", message: "An unexpected error occurred", request_id: requestId });
+      }
+    }
+  });
+}
+
+const TOKEN_ID_MAX_LEN = 64;
+const TOKEN_ID_REGEX = /^[a-z0-9-]+$/;
+
+/** Normalize query param to a single string; validate length and token-id pattern. Returns null if invalid. */
+function parseMarketIdParam(val: unknown): string | null {
+  const raw = Array.isArray(val) ? val[0] : val;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0 || trimmed.length > TOKEN_ID_MAX_LEN) return null;
+  if (!TOKEN_ID_REGEX.test(trimmed)) return null;
+  return trimmed;
+}
+
+/**
+ * GET /market?coingecko_id=ethereum&paprika_id=eth-ethereum
+ * Returns unified market result; 400 invalid token ID or param, 503 when both providers fail.
+ */
+export function registerMarketRoute(
+  app: { get: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void }
+): void {
+  const marketService = new MarketAggregatorService();
+  app.get("/market", async (req: Request, res: Response): Promise<void> => {
+    const coingeckoId = parseMarketIdParam(req.query?.coingecko_id);
+    const paprikaId = parseMarketIdParam(req.query?.paprika_id);
+    if (coingeckoId === null && paprikaId === null) {
+      const hasAny = req.query?.coingecko_id != null || req.query?.paprika_id != null;
+      res.status(400).json({
+        error: hasAny ? "invalid_param" : "coingecko_id or paprika_id required",
+        message: hasAny
+          ? "coingecko_id and paprika_id must be single strings, max 64 chars, only a-z 0-9 and hyphen"
+          : "Provide at least one of coingecko_id or paprika_id",
+      });
+      return;
+    }
+    const cgId = coingeckoId ?? undefined;
+    const papId = paprikaId ?? undefined;
+    try {
+      const result = await marketService.getMarketData(cgId, papId);
+      res.json(result);
+    } catch (err) {
+      if (err instanceof InvalidTokenIdError) {
+        res.status(400).json({ error: "invalid_token_id", message: err.message });
+        return;
+      }
+      if (err instanceof MarketUnavailableError) {
+        res.status(503).json({ error: "market_unavailable", message: err.message });
+        return;
+      }
+      logger.error({ err, route: "/market" }, "Market route error");
+      if (!res.headersSent) {
+        res.status(500).json({ error: "internal_error", message: "An unexpected error occurred" });
       }
     }
   });
