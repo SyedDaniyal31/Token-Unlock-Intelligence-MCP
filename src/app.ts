@@ -1,11 +1,19 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import express, { type Request, type Response } from "express";
 import cors from "cors";
 import cron from "node-cron";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import type { Server } from "http";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  type CallToolResult,
+  type CallToolRequest,
+  isInitializeRequest,
+} from "@modelcontextprotocol/sdk/types.js";
+import type { Server as HttpServer } from "http";
 import { config } from "./core/config.js";
 import logger from "./core/logger.js";
 import { closePool } from "./infrastructure/database/postgres.js";
@@ -78,58 +86,112 @@ app.get("/mcp", (_req: Request, res: Response): void => {
   res.status(200).json({
     ok: true,
     protocol: "mcp",
-    message: "MCP endpoint; use POST for JSON-RPC (e.g. tools/list, tools/call).",
+    message: "MCP endpoint; use POST for JSON-RPC (e.g. initialize, tools/list, tools/call).",
     transports: ["streamable-http"],
   });
 });
 
-app.use("/mcp", createContextMiddleware());
-
-const mcpServer = new McpServer({
-  name: "token-unlock-intelligence-mcp",
-  version: "1.0.0",
-});
-
-/** Context Protocol compliant: JSON Schema for tool input (required for MCP + Context). */
-const ANALYZE_TOKEN_UNLOCK_INPUT_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    token_symbol: {
-      type: "string" as const,
-      description: "Token ticker symbol (e.g. ETH, ARB)",
+/** Tool definitions with outputSchema (Context Protocol compliant). See: https://github.com/ctxprotocol/sdk/tree/main/examples/server */
+const MCP_TOOLS = [
+  {
+    name: "analyze_token_unlock",
+    description:
+      "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        token_symbol: {
+          type: "string" as const,
+          description: "Token ticker symbol (e.g. ETH, ARB)",
+        },
+      },
+      required: ["token_symbol"] as const,
+    },
+    outputSchema: {
+      type: "object" as const,
+      properties: {
+        token_symbol: { type: "string" as const },
+        next_unlock_date: { type: "string" as const },
+        unlock_amount: { type: "number" as const },
+        unlock_percent_supply: { type: "number" as const },
+        unlock_vs_volume_ratio: { type: "number" as const },
+        cohort_type: { type: "string" as const },
+        historical_avg_7d_return: { type: "number" as const },
+        impact_score: { type: "string" as const },
+        risk_summary: { type: "string" as const },
+        fetchedAt: { type: "string" as const },
+      },
+      required: [
+        "token_symbol",
+        "next_unlock_date",
+        "unlock_amount",
+        "unlock_percent_supply",
+        "unlock_vs_volume_ratio",
+        "cohort_type",
+        "historical_avg_7d_return",
+        "impact_score",
+        "risk_summary",
+        "fetchedAt",
+      ] as const,
     },
   },
-  required: ["token_symbol"] as const,
-};
+];
 
-/** Context Protocol compliant: outputSchema for payment verification and dispute resolution. */
-const ANALYZE_TOKEN_UNLOCK_OUTPUT_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    token_symbol: { type: "string" as const },
-    next_unlock_date: { type: "string" as const },
-    unlock_amount: { type: "number" as const },
-    unlock_percent_supply: { type: "number" as const },
-    unlock_vs_volume_ratio: { type: "number" as const },
-    cohort_type: { type: "string" as const },
-    historical_avg_7d_return: { type: "number" as const },
-    impact_score: { type: "string" as const },
-    risk_summary: { type: "string" as const },
-    fetchedAt: { type: "string" as const },
-  },
-  required: [
-    "token_symbol",
-    "next_unlock_date",
-    "unlock_amount",
-    "unlock_percent_supply",
-    "unlock_vs_volume_ratio",
-    "cohort_type",
-    "historical_avg_7d_return",
-    "impact_score",
-    "risk_summary",
-    "fetchedAt",
-  ] as const,
-};
+const mcpServer = new Server(
+  { name: "token-unlock-intelligence-mcp", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
+
+mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS }));
+
+mcpServer.setRequestHandler(
+  CallToolRequestSchema,
+  async (request: CallToolRequest): Promise<CallToolResult> => {
+    const { name, arguments: args } = request.params;
+    const tokenSymbol = (args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "")
+      .toString()
+      .trim();
+
+    const successResult = (data: AnalyzeTokenUnlockOutput): CallToolResult => ({
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data,
+    });
+    const errorResult = (message: string): CallToolResult => ({
+      content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+      isError: true,
+    });
+
+    const safeOutput = (sym: string, summary: string): AnalyzeTokenUnlockOutput => ({
+      token_symbol: sym,
+      next_unlock_date: "",
+      unlock_amount: 0,
+      unlock_percent_supply: 0,
+      unlock_vs_volume_ratio: 0,
+      cohort_type: "",
+      historical_avg_7d_return: 0,
+      impact_score: "error",
+      risk_summary: summary,
+      fetchedAt: new Date().toISOString(),
+    });
+
+    if (name !== "analyze_token_unlock") return errorResult(`Unknown tool: ${name}`);
+
+    if (!tokenSymbol) {
+      return successResult(safeOutput("", "token_symbol is required."));
+    }
+
+    try {
+      const report = await getIntelligenceReport(tokenSymbol, deps);
+      const structuredContent = reportToLegacyShape(report);
+      logger.info({ tool: "analyze_token_unlock", token_symbol: report.token_symbol, impact_score: report.impact_score });
+      return successResult(structuredContent);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err, message }, "analyze_token_unlock error");
+      return successResult(safeOutput(tokenSymbol, `Unlock analysis failed: ${message}.`));
+    }
+  }
+);
 
 type AnalyzeTokenUnlockOutput = {
   token_symbol: string;
@@ -144,172 +206,69 @@ type AnalyzeTokenUnlockOutput = {
   fetchedAt: string;
 };
 
-function safeErrorOutput(tokenSymbol: string, riskSummary: string): AnalyzeTokenUnlockOutput {
-  return {
-    token_symbol: tokenSymbol,
-    next_unlock_date: "",
-    unlock_amount: 0,
-    unlock_percent_supply: 0,
-    unlock_vs_volume_ratio: 0,
-    cohort_type: "",
-    historical_avg_7d_return: 0,
-    impact_score: "error",
-    risk_summary: riskSummary,
-    fetchedAt: new Date().toISOString(),
-  };
-}
-
-/** Context compliant: both content (backward compat) and structuredContent (required by Context). */
-function toToolResult(structuredContent: AnalyzeTokenUnlockOutput) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
-    structuredContent,
-  };
-}
-
-(mcpServer.registerTool as CallableFunction)(
-  "analyze_token_unlock",
-  {
-    description:
-      "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
-    inputSchema: ANALYZE_TOKEN_UNLOCK_INPUT_SCHEMA,
-    outputSchema: ANALYZE_TOKEN_UNLOCK_OUTPUT_SCHEMA,
-  },
-  (async (args: { token_symbol?: string }) => {
-    const startMs = Date.now();
-    const tokenSymbol = (args as { token_symbol?: string }).token_symbol?.trim() ?? "";
-
-    try {
-      if (!tokenSymbol) {
-        const out = safeErrorOutput("", "token_symbol is required.");
-        logger.info({
-          tool: "analyze_token_unlock",
-          token_symbol: out.token_symbol,
-          responseTimeMs: Date.now() - startMs,
-          resultFound: false,
-        });
-        return toToolResult(out);
-      }
-
-      const report = await getIntelligenceReport(tokenSymbol, deps);
-      const structuredContent = reportToLegacyShape(report);
-      logger.info({
-        tool: "analyze_token_unlock",
-        token_symbol: report.token_symbol,
-        responseTimeMs: Date.now() - startMs,
-        resultFound: true,
-        impact_score: report.impact_score,
-      });
-      return toToolResult(structuredContent);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err, message }, "analyze_token_unlock error");
-      const out = safeErrorOutput(
-        tokenSymbol,
-        `Unlock analysis failed: ${message}.`
-      );
-      return toToolResult(out);
-    }
-  })
-);
-
-const transport = new StreamableHTTPServerTransport({
-  sessionIdGenerator: undefined,
-});
-
-const mcpConnectPromise = mcpServer.connect(transport).catch((err: Error) => {
-  logger.error({ err }, "MCP server connect error");
-  throw err;
-});
+const mcpTransports: Record<string, StreamableHTTPServerTransport> = {};
+const verifyContextAuth = createContextMiddleware();
 
 app.post(
   "/mcp",
+  verifyContextAuth,
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
-    logger.info({
-      route: "/mcp",
-      method: req.method,
-      hasBody: !!req.body,
-      timestamp: new Date().toISOString(),
-    });
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport: StreamableHTTPServerTransport;
 
-    if (!req.body) {
-      res.status(400).json({ error: "Missing request body" });
-      return;
-    }
-    if (typeof req.body !== "object") {
-      res.status(400).json({ error: "Missing request body" });
-      return;
-    }
-    const body = req.body as Record<string, unknown>;
-    const b = body as { jsonrpc?: string; method?: string; params?: { name?: string; arguments?: unknown }; id?: unknown };
-    if (b.jsonrpc !== "2.0") {
+    if (sessionId && mcpTransports[sessionId]) {
+      transport = mcpTransports[sessionId];
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          mcpTransports[id] = transport;
+          logger.info({ sessionId: id }, "MCP session initialized");
+        },
+      });
+      transport.onclose = () => {
+        if (transport.sessionId) {
+          delete mcpTransports[transport.sessionId];
+          logger.info({ sessionId: transport.sessionId }, "MCP session closed");
+        }
+      };
+      await mcpServer.connect(transport);
+    } else {
       res.status(400).json({
         jsonrpc: "2.0",
-        id: b.id ?? null,
-        error: { code: -32600, message: "Invalid Request" },
+        error: { code: -32000, message: "Invalid session. Send initialize request first." },
+        id: null,
       });
       return;
     }
-    if (b.method === "tools/call") {
-      if (!b.params || typeof b.params !== "object") {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          id: b.id ?? null,
-          error: { code: -32602, message: "Invalid params" },
-        });
-        return;
-      }
-      if (!b.params.name || typeof b.params.name !== "string") {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          id: b.id ?? null,
-          error: { code: -32602, message: "Invalid params: name required" },
-        });
-        return;
-      }
-      if (!b.params.arguments || typeof b.params.arguments !== "object") {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          id: b.id ?? null,
-          error: { code: -32602, message: "Invalid params: arguments required" },
-        });
-        return;
-      }
-      const args = b.params.arguments as Record<string, unknown>;
-      if (b.params.name === "analyze_token_unlock") {
-        const tokenSymbolVal = (args.token_symbol ?? args.tokenSymbol) ?? "";
-        if (!tokenSymbolVal || typeof tokenSymbolVal !== "string" || !String(tokenSymbolVal).trim()) {
-          res.status(400).json({
-            jsonrpc: "2.0",
-            id: b.id ?? null,
-            error: { code: -32602, message: "Invalid params: token_symbol required" },
-          });
-          return;
-        }
-      }
-    }
-    try {
-      await mcpConnectPromise;
-      await transport.handleRequest(req, res, body);
-    } catch (err) {
-      logger.error(
-        { err, method: b.method, id: b.id, message: err instanceof Error ? err.message : String(err) },
-        "MCP transport handleRequest error"
-      );
-      if (!res.headersSent) {
-        res.status(500).json({
-          jsonrpc: "2.0",
-          id: b.id ?? null,
-          error: { code: -32603, message: "Internal server error" },
-        });
-      }
-    }
+
+    await transport.handleRequest(req, res, req.body);
   })
 );
 
+app.get("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  const transport = sessionId ? mcpTransports[sessionId] : undefined;
+  if (transport) {
+    await transport.handleRequest(req, res);
+  } else {
+    res.status(400).json({ error: "Invalid session" });
+  }
+});
+
+app.delete("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  const transport = sessionId ? mcpTransports[sessionId] : undefined;
+  if (transport) {
+    await transport.handleRequest(req, res);
+  } else {
+    res.status(400).json({ error: "Invalid session" });
+  }
+});
+
 app.use(errorHandler);
 
-let httpServer: Server | null = null;
+let httpServer: HttpServer | null = null;
 
 const precomputeCron = cron.schedule("0 */6 * * *", () => {
   syncUnlockRegistryToDb()
@@ -320,7 +279,7 @@ const precomputeCron = cron.schedule("0 */6 * * *", () => {
     });
 });
 
-export function start(port: number): Server {
+export function start(port: number): HttpServer {
   httpServer = app.listen(port, (): void => {
     logger.info({ port }, "Server listening");
     syncUnlockRegistryToDb()
@@ -339,7 +298,7 @@ export async function shutdown(): Promise<void> {
   if (httpServer) {
     httpServer.close();
   }
-  await transport.close();
+  await Promise.all(Object.values(mcpTransports).map((t) => t.close()));
   await closePool();
   process.exit(0);
 }
