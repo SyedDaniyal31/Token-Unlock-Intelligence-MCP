@@ -34,9 +34,14 @@ export function errorHandler(
 
   if (res.headersSent) return;
 
+  const message =
+    process.env.NODE_ENV === "development" && err instanceof Error
+      ? err.message
+      : "Unexpected server error";
+
   res.status(500).json({
-    error: "internal_error",
-    message: "An unexpected error occurred",
+    error: "Internal Server Error",
+    message,
     request_id: requestId,
   });
 }

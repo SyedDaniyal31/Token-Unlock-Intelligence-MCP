@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
 import { getIntelligenceReport, extractTokenFromQuery, reportToLegacyShape } from "./mcpController.js";
+import { handleRisk } from "./riskHandler.js";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
 import logger from "../core/logger.js";
@@ -13,6 +14,20 @@ import {
   InvalidTokenIdError,
   MarketUnavailableError,
 } from "../services/MarketAggregator.js";
+
+/** Normalize token: trim, uppercase. Returns empty string if not a valid string. */
+function normalizeToken(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw.trim().toUpperCase();
+}
+
+/** Validate token against registry. Returns normalized symbol if valid, null otherwise. */
+async function validateTokenInRegistry(raw: string): Promise<string | null> {
+  const symbol = normalizeToken(raw);
+  if (!symbol) return null;
+  const schedule = await getScheduleByToken(symbol);
+  return schedule ? symbol : null;
+}
 
 /** POST /intelligence body: token_symbol or query required; optional chain_id and market ids. */
 const intelligenceBodySchema = z.object({
@@ -78,8 +93,23 @@ export function registerDiagnosticsRoute(
   });
 }
 
+/** Shared intelligence handler: validate token, fetch report. Call from both GET and POST. */
+async function handleIntelligenceRequest(
+  token: string,
+  deps: UnlockIntelligenceDeps
+): Promise<Awaited<ReturnType<typeof getIntelligenceReport>>> {
+  const symbol = await validateTokenInRegistry(token);
+  if (!symbol) {
+    return Promise.reject(Object.assign(new Error("Invalid token"), { statusCode: 400 }));
+  }
+  return getIntelligenceReport(symbol, deps);
+}
+
 export function registerIntelligenceRoute(
-  app: { post: (path: string, handler: (req: Request, res: Response) => void) => void },
+  app: {
+    get: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void;
+    post: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void;
+  },
   deps: UnlockIntelligenceDeps
 ): void {
   app.post("/intelligence", async (req: Request & RequestWithId, res: Response): Promise<void> => {
@@ -106,20 +136,103 @@ export function registerIntelligenceRoute(
         });
         return;
       }
-      const schedule = await getScheduleByToken(tokenSymbol);
-      if (!schedule) {
-        logger.info({ request_id: requestId, token_symbol: tokenSymbol }, "Token not found");
-        res.status(404).json({ error: "token_not_found" });
-        return;
-      }
-      const report = await getIntelligenceReport(tokenSymbol, deps);
+      const report = await handleIntelligenceRequest(tokenSymbol, deps);
       res.json(report);
     } catch (err) {
+      const statusCode = err && typeof err === "object" && "statusCode" in err ? (err as { statusCode: number }).statusCode : 500;
+      if (statusCode === 400) {
+        res.status(400).json({ error: "Invalid token" });
+        return;
+      }
       logger.error({ err, request_id: requestId, route: "/intelligence" }, "intelligence route error");
       if (!res.headersSent) {
         res.status(500).json({ error: "internal_error", message: "An unexpected error occurred", request_id: requestId });
       }
     }
+  });
+
+  app.get("/intelligence", async (req: Request & RequestWithId, res: Response): Promise<void> => {
+    const requestId = req.request_id ?? "";
+    const tokenRaw = req.query.token ?? req.query.token_symbol ?? "";
+    if (!tokenRaw || normalizeToken(tokenRaw) === "") {
+      res.status(400).json({
+        error: "Missing token",
+        message: "Provide token query parameter (e.g. ?token=ARB)",
+      });
+      return;
+    }
+    try {
+      const report = await handleIntelligenceRequest(String(tokenRaw), deps);
+      res.json(report);
+    } catch (err) {
+      const statusCode = err && typeof err === "object" && "statusCode" in err ? (err as { statusCode: number }).statusCode : 500;
+      if (statusCode === 400) {
+        res.status(400).json({ error: "Invalid token" });
+        return;
+      }
+      logger.error({ err, request_id: requestId, route: "/intelligence" }, "intelligence route error");
+      if (!res.headersSent) {
+        res.status(500).json({ error: "internal_error", message: "An unexpected error occurred", request_id: requestId });
+      }
+    }
+  });
+}
+
+/** POST /risk body: { token }; GET /risk ?token= — same handler, token guard, structured logging. */
+export function registerRiskRoute(
+  app: {
+    get: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void;
+    post: (path: string, handler: (req: Request, res: Response) => void | Promise<void>) => void;
+  },
+  deps: UnlockIntelligenceDeps
+): void {
+  const runRisk = async (req: Request & RequestWithId, res: Response, token: string): Promise<void> => {
+    logger.info({ route: "/risk", method: req.method, token }, "risk request");
+    const symbol = await validateTokenInRegistry(token);
+    if (!symbol) {
+      res.status(400).json({ error: "Invalid token" });
+      return;
+    }
+    try {
+      const result = await handleRisk(symbol, deps);
+      res.json(result);
+    } catch (err) {
+      logger.error({ err, request_id: req.request_id, route: "/risk" }, "risk route error");
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: "internal_error",
+          message: "An unexpected error occurred",
+          request_id: req.request_id ?? "",
+        });
+      }
+    }
+  };
+
+  app.post("/risk", async (req: Request & RequestWithId, res: Response): Promise<void> => {
+    const body = req.body as { token?: unknown };
+    const tokenRaw = body?.token ?? "";
+    const token = normalizeToken(tokenRaw);
+    if (!token) {
+      res.status(400).json({
+        error: "Missing token",
+        message: "Request body must include token (e.g. { \"token\": \"ARB\" })",
+      });
+      return;
+    }
+    await runRisk(req, res, token);
+  });
+
+  app.get("/risk", async (req: Request & RequestWithId, res: Response): Promise<void> => {
+    const tokenRaw = req.query.token ?? "";
+    const token = normalizeToken(tokenRaw);
+    if (!token) {
+      res.status(400).json({
+        error: "Missing token",
+        message: "Provide token query parameter (e.g. ?token=ARB)",
+      });
+      return;
+    }
+    await runRisk(req, res, token);
   });
 }
 
