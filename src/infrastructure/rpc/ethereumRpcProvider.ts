@@ -10,8 +10,9 @@ import logger from "../../core/logger.js";
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 const CONFIRMATION_DEPTH = 12;
-const INITIAL_BATCH_SIZE = 5_000;
-const MIN_BATCH_SIZE = 500;
+/** Free-tier RPC (e.g. Alchemy/Infura) often allows max 10 blocks for eth_getLogs; use 10 so we don't trigger "block range too wide". */
+const INITIAL_BATCH_SIZE = 10;
+const MIN_BATCH_SIZE = 10;
 const RPC_DELAY_MS = 100;
 const MAX_RETRIES = 2;
 
@@ -19,6 +20,8 @@ const MAX_RETRIES = 2;
 const ADAPTIVE_ERROR_PHRASES = [
   "query returned more than",
   "block range too wide",
+  "10 block range",
+  "free tier",
   "timeout",
   "time out",
   "ETIMEDOUT",

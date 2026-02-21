@@ -148,20 +148,6 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TO
 mcpServer.setRequestHandler(
   CallToolRequestSchema,
   async (request: CallToolRequest): Promise<CallToolResult> => {
-    const { name, arguments: args } = request.params;
-    const raw =
-      args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "ARB";
-    const tokenSymbol = (typeof raw === "string" ? raw : String(raw ?? "")).trim() || "ARB";
-
-    const successResult = (data: AnalyzeTokenUnlockOutput): CallToolResult => ({
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data,
-    });
-    const errorResult = (message: string): CallToolResult => ({
-      content: [{ type: "text", text: JSON.stringify({ error: message }) }],
-      isError: true,
-    });
-
     const safeOutput = (sym: string, summary: string): AnalyzeTokenUnlockOutput => ({
       token_symbol: sym,
       next_unlock_date: "",
@@ -174,30 +160,60 @@ mcpServer.setRequestHandler(
       risk_summary: summary,
       fetchedAt: new Date().toISOString(),
     });
-
-    if (name !== "analyze_token_unlock") return errorResult(`Unknown tool: ${name}`);
-
-    const symbol = tokenSymbol || "ARB";
-
-    const TOOL_TIMEOUT_MS = 25_000;
+    const successResult = (data: AnalyzeTokenUnlockOutput): CallToolResult => ({
+      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      structuredContent: data,
+    });
+    const errorResult = (message: string): CallToolResult => ({
+      content: [{ type: "text", text: JSON.stringify({ error: message }) }],
+      isError: true,
+    });
 
     try {
-      const report = await Promise.race([
-        getIntelligenceReport(symbol, deps),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-        ),
-      ]);
-      const structuredContent = reportToLegacyShape(report);
-      logger.info({ tool: "analyze_token_unlock", token_symbol: report.token_symbol, impact_score: report.impact_score });
-      return successResult(structuredContent);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err, message }, "analyze_token_unlock error");
-      const summary = message.includes("timed out")
-        ? "Analysis timed out; try again or use a different token."
-        : `Unlock analysis failed: ${message}.`;
-      return successResult(safeOutput(symbol, summary));
+      const { name, arguments: args } = request.params;
+      const raw =
+        args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "ARB";
+      const tokenSymbol = (typeof raw === "string" ? raw : String(raw ?? "")).trim() || "ARB";
+
+      if (name !== "analyze_token_unlock") return errorResult(`Unknown tool: ${name}`);
+
+      const symbol = tokenSymbol || "ARB";
+      const TOOL_TIMEOUT_MS = 25_000;
+
+      try {
+        const report = await Promise.race([
+          getIntelligenceReport(symbol, deps),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+          ),
+        ]);
+        const rawContent = reportToLegacyShape(report);
+        const structuredContent: AnalyzeTokenUnlockOutput = {
+          token_symbol: String(rawContent.token_symbol ?? ""),
+          next_unlock_date: String(rawContent.next_unlock_date ?? ""),
+          unlock_amount: Number(rawContent.unlock_amount) || 0,
+          unlock_percent_supply: Number(rawContent.unlock_percent_supply) || 0,
+          unlock_vs_volume_ratio: Number(rawContent.unlock_vs_volume_ratio) || 0,
+          cohort_type: String(rawContent.cohort_type ?? ""),
+          historical_avg_7d_return: Number(rawContent.historical_avg_7d_return) || 0,
+          impact_score: String(rawContent.impact_score ?? ""),
+          risk_summary: String(rawContent.risk_summary ?? ""),
+          fetchedAt: String(rawContent.fetchedAt ?? new Date().toISOString()),
+        };
+        logger.info({ tool: "analyze_token_unlock", token_symbol: report.token_symbol, impact_score: report.impact_score });
+        return successResult(structuredContent);
+      } catch (innerErr) {
+        const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
+        logger.error({ err: innerErr, message }, "analyze_token_unlock error");
+        const summary = message.includes("timed out")
+          ? "Analysis timed out; try again or use a different token."
+          : `Unlock analysis failed: ${message}.`;
+        return successResult(safeOutput(symbol, summary));
+      }
+    } catch (outerErr) {
+      const message = outerErr instanceof Error ? outerErr.message : String(outerErr);
+      logger.error({ err: outerErr, message }, "analyze_token_unlock unexpected error");
+      return successResult(safeOutput("", `Server error: ${message}. Please try again.`));
     }
   }
 );
