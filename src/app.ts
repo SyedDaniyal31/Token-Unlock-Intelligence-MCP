@@ -2,7 +2,6 @@ import "dotenv/config";
 import express, { type Request, type Response } from "express";
 import cors from "cors";
 import cron from "node-cron";
-import { z } from "zod";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -83,6 +82,7 @@ app.get("/mcp", (_req: Request, res: Response): void => {
     transports: ["streamable-http"],
   });
 });
+
 app.use("/mcp", createContextMiddleware());
 
 const mcpServer = new McpServer({
@@ -90,20 +90,48 @@ const mcpServer = new McpServer({
   version: "1.0.0",
 });
 
-const analyzeTokenUnlockOutputSchema = {
-  token_symbol: z.string(),
-  next_unlock_date: z.string(),
-  unlock_amount: z.number(),
-  unlock_percent_supply: z.number(),
-  unlock_vs_volume_ratio: z.number(),
-  cohort_type: z.string(),
-  historical_avg_7d_return: z.number(),
-  impact_score: z.string(),
-  risk_summary: z.string(),
-  fetchedAt: z.string(),
+/** Context Protocol compliant: JSON Schema for tool input (required for MCP + Context). */
+const ANALYZE_TOKEN_UNLOCK_INPUT_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    token_symbol: {
+      type: "string" as const,
+      description: "Token ticker symbol (e.g. ETH, ARB)",
+    },
+  },
+  required: ["token_symbol"] as const,
 };
 
-type LegacyOutput = {
+/** Context Protocol compliant: outputSchema for payment verification and dispute resolution. */
+const ANALYZE_TOKEN_UNLOCK_OUTPUT_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    token_symbol: { type: "string" as const },
+    next_unlock_date: { type: "string" as const },
+    unlock_amount: { type: "number" as const },
+    unlock_percent_supply: { type: "number" as const },
+    unlock_vs_volume_ratio: { type: "number" as const },
+    cohort_type: { type: "string" as const },
+    historical_avg_7d_return: { type: "number" as const },
+    impact_score: { type: "string" as const },
+    risk_summary: { type: "string" as const },
+    fetchedAt: { type: "string" as const },
+  },
+  required: [
+    "token_symbol",
+    "next_unlock_date",
+    "unlock_amount",
+    "unlock_percent_supply",
+    "unlock_vs_volume_ratio",
+    "cohort_type",
+    "historical_avg_7d_return",
+    "impact_score",
+    "risk_summary",
+    "fetchedAt",
+  ] as const,
+};
+
+type AnalyzeTokenUnlockOutput = {
   token_symbol: string;
   next_unlock_date: string;
   unlock_amount: number;
@@ -116,7 +144,7 @@ type LegacyOutput = {
   fetchedAt: string;
 };
 
-function safeErrorOutput(tokenSymbol: string, riskSummary: string): LegacyOutput {
+function safeErrorOutput(tokenSymbol: string, riskSummary: string): AnalyzeTokenUnlockOutput {
   return {
     token_symbol: tokenSymbol,
     next_unlock_date: "",
@@ -131,24 +159,25 @@ function safeErrorOutput(tokenSymbol: string, riskSummary: string): LegacyOutput
   };
 }
 
+/** Context compliant: both content (backward compat) and structuredContent (required by Context). */
+function toToolResult(structuredContent: AnalyzeTokenUnlockOutput) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
+    structuredContent,
+  };
+}
+
 (mcpServer.registerTool as CallableFunction)(
   "analyze_token_unlock",
   {
     description:
       "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
-    inputSchema: {
-      token_symbol: z.string().describe("Token ticker symbol (e.g. ETH, ARB)"),
-    },
-    outputSchema: analyzeTokenUnlockOutputSchema,
+    inputSchema: ANALYZE_TOKEN_UNLOCK_INPUT_SCHEMA,
+    outputSchema: ANALYZE_TOKEN_UNLOCK_OUTPUT_SCHEMA,
   },
   (async (args: { token_symbol?: string }) => {
     const startMs = Date.now();
     const tokenSymbol = (args as { token_symbol?: string }).token_symbol?.trim() ?? "";
-
-    const toResult = (structuredContent: LegacyOutput) => ({
-      content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
-      structuredContent,
-    });
 
     try {
       if (!tokenSymbol) {
@@ -159,7 +188,7 @@ function safeErrorOutput(tokenSymbol: string, riskSummary: string): LegacyOutput
           responseTimeMs: Date.now() - startMs,
           resultFound: false,
         });
-        return toResult(out);
+        return toToolResult(out);
       }
 
       const report = await getIntelligenceReport(tokenSymbol, deps);
@@ -171,7 +200,7 @@ function safeErrorOutput(tokenSymbol: string, riskSummary: string): LegacyOutput
         resultFound: true,
         impact_score: report.impact_score,
       });
-      return toResult(structuredContent);
+      return toToolResult(structuredContent);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, message }, "analyze_token_unlock error");
@@ -179,7 +208,7 @@ function safeErrorOutput(tokenSymbol: string, riskSummary: string): LegacyOutput
         tokenSymbol,
         `Unlock analysis failed: ${message}.`
       );
-      return toResult(out);
+      return toToolResult(out);
     }
   })
 );
