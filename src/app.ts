@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
-import express, { type Request, type Response } from "express";
+import express, { type Request, type Response, type NextFunction } from "express";
 import cors from "cors";
 import cron from "node-cron";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
@@ -82,7 +82,12 @@ app.get("/", (_req: Request, res: Response): void => {
   });
 });
 
-app.get("/mcp", (_req: Request, res: Response): void => {
+app.get("/mcp", (req: Request, res: Response, next: NextFunction): void => {
+  const accept = (req.headers.accept ?? "").toLowerCase();
+  if (accept.includes("text/event-stream")) {
+    next();
+    return;
+  }
   res.status(200).json({
     ok: true,
     protocol: "mcp",
