@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express, { type Request, type Response } from "express";
+import cors from "cors";
 import cron from "node-cron";
 import { z } from "zod";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
@@ -48,6 +49,7 @@ const deps = {
 };
 
 const app = express();
+app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(requestIdMiddleware);
 app.use(globalRateLimiter);
@@ -68,15 +70,17 @@ app.get("/", (_req: Request, res: Response): void => {
       intelligence: "POST /intelligence, GET /intelligence?token=SYMBOL",
       risk: "POST /risk, GET /risk?token=SYMBOL",
       market: "GET /market",
-      mcp: "POST /mcp",
+      mcp: "GET /mcp (discovery), POST /mcp (JSON-RPC)",
     },
   });
 });
 
 app.get("/mcp", (_req: Request, res: Response): void => {
-  res.status(405).json({
-    error: "Method Not Allowed",
-    allowed: ["POST"],
+  res.status(200).json({
+    ok: true,
+    protocol: "mcp",
+    message: "MCP endpoint; use POST for JSON-RPC (e.g. tools/list, tools/call).",
+    transports: ["streamable-http"],
   });
 });
 app.use("/mcp", createContextMiddleware());
