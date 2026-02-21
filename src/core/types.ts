@@ -88,6 +88,23 @@ export interface MarketSnapshot {
   fetched_at: string;
 }
 
+/** Liquidity stress from unlock pressure vs market liquidity model. */
+export type LiquidityRiskLevel = "LOW" | "MODERATE" | "HIGH" | "EXTREME";
+
+export interface LiquidityStressResult {
+  unlockAmount: number;
+  unlockValueUSD: number;
+  volume30dAvg: number;
+  unlockToVolumeRatio: number;
+  circulatingSupply: number;
+  unlockToSupplyPct: number;
+  fdv?: number;
+  unlockToFDVPct?: number;
+  compositeScore: number;
+  riskLevel: LiquidityRiskLevel;
+  insufficientData?: boolean;
+}
+
 export type RiskLevel = "low" | "moderate" | "high" | "extreme";
 
 export interface ChainReport {
@@ -128,6 +145,8 @@ export interface IntelligenceReport {
     real_sellable_supply: number;
   };
   fetched_at: string;
+  /** Unlock pressure vs liquidity metrics (composite score, risk level, ratios). */
+  liquidityStress?: LiquidityStressResult;
   /** Multi-chain: per-chain reports when available */
   chains?: Record<string, ChainReport>;
   /** Multi-chain: aggregated score across chains (optional weighting) */

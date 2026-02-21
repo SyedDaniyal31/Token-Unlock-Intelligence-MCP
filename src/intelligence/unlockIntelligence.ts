@@ -3,6 +3,7 @@ import type {
   MarketDataProvider,
   ExchangeRegistry,
   IntelligenceReport,
+  LiquidityStressResult,
   MarketSnapshot,
   RiskLevel,
   ChainReport,
@@ -17,6 +18,7 @@ import {
   type ScoringOutput,
 } from "./impactScoring.js";
 import { getMarketData } from "../market/MarketAggregator.js";
+import { calculateLiquidityStress, type MarketData } from "../services/LiquidityStressModel.js";
 import logger from "../core/logger.js";
 
 export interface UnlockIntelligenceDeps {
@@ -41,6 +43,18 @@ function riskLevelToScoreString(risk: RiskLevel): string {
   return risk;
 }
 
+const INSUFFICIENT_LIQUIDITY_STRESS: LiquidityStressResult = {
+  unlockAmount: 0,
+  unlockValueUSD: 0,
+  volume30dAvg: 0,
+  unlockToVolumeRatio: 0,
+  circulatingSupply: 0,
+  unlockToSupplyPct: 0,
+  compositeScore: 0,
+  riskLevel: "LOW",
+  insufficientData: true,
+};
+
 function emptyReport(symbol: string): IntelligenceReport {
   return {
     token_symbol: symbol,
@@ -64,6 +78,7 @@ function emptyReport(symbol: string): IntelligenceReport {
       exchange_inflow: 0,
       real_sellable_supply: 0,
     },
+    liquidityStress: INSUFFICIENT_LIQUIDITY_STRESS,
     fetched_at: new Date().toISOString(),
   };
 }
@@ -158,6 +173,30 @@ export async function generateUnlockIntelligence(
 
   const nextUnlock = metadata?.vesting_end ?? null;
   const unlockAmount = supply.claimed_amount;
+  const totalUpcomingUnlockAmount = supply.real_sellable_supply;
+  const marketDataForLiquidity: MarketData = {
+    price: market.price_usd,
+    marketCap: market.market_cap_usd,
+    volume24h: market.avg_30d_volume_usd ?? 0,
+    circulatingSupply: market.circulating_supply ?? 0,
+  };
+  let liquidityStress: Awaited<ReturnType<typeof calculateLiquidityStress>>;
+  try {
+    liquidityStress = calculateLiquidityStress(totalUpcomingUnlockAmount, marketDataForLiquidity);
+  } catch (err) {
+    logger.warn({ err, token_symbol: symbol }, "Liquidity stress calculation failed");
+    liquidityStress = {
+      unlockAmount: totalUpcomingUnlockAmount,
+      unlockValueUSD: 0,
+      volume30dAvg: 0,
+      unlockToVolumeRatio: 0,
+      circulatingSupply: market.circulating_supply ?? 0,
+      unlockToSupplyPct: 0,
+      compositeScore: 0,
+      riskLevel: "LOW",
+      insufficientData: true,
+    };
+  }
   const percentSupply =
     supply.scheduled_amount > 0
       ? (supply.real_sellable_supply / supply.scheduled_amount) * 100
@@ -184,6 +223,7 @@ export async function generateUnlockIntelligence(
     sell_pressure_estimate: scoring.sell_pressure_estimate,
     sellable_supply: toReportSellableSupply(supply),
     fetched_at: new Date().toISOString(),
+    liquidityStress,
   };
 
   try {
