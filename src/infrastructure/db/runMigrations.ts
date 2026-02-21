@@ -30,17 +30,29 @@ function getDatabaseUrl(): string {
   return String(url).trim();
 }
 
-function resolveSqlPath(relativePath: string): string {
-  const cwd = process.cwd();
-  const candidates = [
-    path.join(cwd, relativePath),
-    path.join(cwd, "..", relativePath),
-    path.join(cwd, "..", "..", relativePath),
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+/**
+ * Directory containing migration SQL files. Prefer dist/sql (filled by build) so
+ * running "node dist/index.js" finds sql/ next to dist; fallback to process.cwd()/sql.
+ */
+function getMigrationRoot(): string {
+  try {
+    const thisDir = typeof __dirname !== "undefined" ? __dirname : process.cwd();
+    const distRoot = path.resolve(thisDir, "..", "..");
+    const distSql = path.join(distRoot, "sql");
+    if (fs.existsSync(distSql)) return distSql;
+    const cwdSql = path.join(process.cwd(), "sql");
+    if (fs.existsSync(cwdSql)) return cwdSql;
+  } catch {
+    // ignore
   }
-  return path.join(cwd, relativePath);
+  return path.join(process.cwd(), "sql");
+}
+
+function resolveSqlPath(relativePath: string): string {
+  const base = path.basename(relativePath);
+  const migrationRoot = getMigrationRoot();
+  const resolved = path.join(migrationRoot, base);
+  return resolved;
 }
 
 function loadSql(filePath: string): string {
@@ -66,21 +78,31 @@ export async function runMigrations(): Promise<void> {
   try {
     await client.query("BEGIN");
 
-    for (const relativePath of MIGRATION_ORDER) {
+    const migrationRoot = getMigrationRoot();
+    logger.info({ migrationRoot }, "Migration root resolved");
+
+    for (let i = 0; i < MIGRATION_ORDER.length; i++) {
+      const relativePath = MIGRATION_ORDER[i];
       const absolutePath = resolveSqlPath(relativePath);
-      const name = path.basename(absolutePath);
+      const name = path.basename(relativePath);
 
       if (!fs.existsSync(absolutePath)) {
+        const msg = `Migration file not found: ${absolutePath} (root: ${migrationRoot})`;
+        if (i === 0) {
+          throw new Error(msg + ". Ensure 'npm run build' ran (copies sql/ to dist/sql).");
+        }
         logger.warn({ path: absolutePath }, "Migration file missing; skipping");
         continue;
       }
 
       const sql = loadSql(absolutePath);
-      const statements = sql
+      const rawStatements = sql
         .replace(/\r\n/g, "\n")
         .split(/\s*;\s*\n/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0 && !s.startsWith("--"));
+        .map((s) => s.trim());
+      const statements = rawStatements
+        .map((s) => s.replace(/^\s*--[^\n]*\n?/gm, "").trim())
+        .filter((s) => s.length > 0);
 
       for (const statement of statements) {
         const one = statement.endsWith(";") ? statement : statement + ";";
