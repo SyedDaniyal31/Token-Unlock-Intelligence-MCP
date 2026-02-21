@@ -10,6 +10,7 @@
 -- unlock_schedules: add chain_id, update unique (existing rows get DEFAULT 'ethereum')
 ALTER TABLE unlock_schedules ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT 'ethereum';
 ALTER TABLE unlock_schedules DROP CONSTRAINT IF EXISTS unlock_schedules_token_symbol_contract_address_key;
+ALTER TABLE unlock_schedules DROP CONSTRAINT IF EXISTS unlock_schedules_token_contract_chain_key;
 ALTER TABLE unlock_schedules ADD CONSTRAINT unlock_schedules_token_contract_chain_key
   UNIQUE (token_symbol, contract_address, chain_id);
 CREATE INDEX IF NOT EXISTS idx_unlock_schedules_chain ON unlock_schedules (chain_id);
@@ -23,6 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_unlock_events_token_chain ON unlock_events (token
 -- vesting_analysis: add chain_id, update unique
 ALTER TABLE vesting_analysis ADD COLUMN IF NOT EXISTS chain_id TEXT NOT NULL DEFAULT 'ethereum';
 ALTER TABLE vesting_analysis DROP CONSTRAINT IF EXISTS vesting_analysis_token_symbol_contract_address_key;
+ALTER TABLE vesting_analysis DROP CONSTRAINT IF EXISTS vesting_analysis_token_contract_chain_key;
 ALTER TABLE vesting_analysis ADD CONSTRAINT vesting_analysis_token_contract_chain_key
   UNIQUE (token_symbol, contract_address, chain_id);
 CREATE INDEX IF NOT EXISTS idx_vesting_analysis_chain ON vesting_analysis (chain_id);
