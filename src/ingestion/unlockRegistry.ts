@@ -110,6 +110,38 @@ export async function getChainIdsForToken(tokenSymbol: string): Promise<string[]
   return ids.length > 0 ? ids : ["ethereum"];
 }
 
+export interface UnlockEventRow {
+  id: string;
+  token_symbol: string;
+  amount: string;
+  timestamp: Date | null;
+  chain_id: string | null;
+}
+
+/** Events for token in [since, until]; optional chainId. Used for historical unlock analysis. */
+export async function getUnlockEventsInRange(
+  tokenSymbol: string,
+  since: Date,
+  until?: Date,
+  chainId?: string | null
+): Promise<UnlockEventRow[]> {
+  const untilVal = until ?? new Date();
+  if (chainId != null && chainId !== "") {
+    const result = await query<{ id: string; token_symbol: string; amount: string; timestamp: Date | null; chain_id: string | null }>(
+      `SELECT id, token_symbol, amount, timestamp, chain_id FROM unlock_events
+       WHERE token_symbol = $1 AND COALESCE(chain_id, 'ethereum') = $2 AND timestamp >= $3 AND timestamp <= $4 ORDER BY timestamp ASC`,
+      [tokenSymbol, chainId, since, untilVal]
+    );
+    return result.rows;
+  }
+  const result = await query<{ id: string; token_symbol: string; amount: string; timestamp: Date | null; chain_id: string | null }>(
+    `SELECT id, token_symbol, amount, timestamp, chain_id FROM unlock_events
+     WHERE token_symbol = $1 AND timestamp >= $2 AND timestamp <= $3 ORDER BY timestamp ASC`,
+    [tokenSymbol, since, untilVal]
+  );
+  return result.rows;
+}
+
 export async function getScheduleByToken(
   tokenSymbol: string,
   chainId?: string

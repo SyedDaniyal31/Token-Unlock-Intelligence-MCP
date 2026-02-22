@@ -7,8 +7,7 @@
 import type { Request, Response } from "express";
 import type { RequestHandler } from "express";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
-import { getIntelligenceReport } from "./mcpController.js";
-import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
+import { runAnalyzeTokenSupplyRisk } from "../tools/analyze_token_supply_risk.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -34,30 +33,29 @@ export interface JsonRpcErrorBody {
   error: { code: number; message: string };
 }
 
-export type McpToolOutput = {
-  unlock_pressure_ratio: number;
-  volume_impact_ratio: number;
-  supply_inflation_percent: number;
-  risk_score: number;
-};
-
 // ---------------------------------------------------------------------------
-// Tool definition – name and inputSchema match Context (token_symbol)
+// Tool definition – analyze_token_supply_risk (multi-chain supply risk engine)
 // ---------------------------------------------------------------------------
 
-const MCP_TOOL_NAME = "analyze_token_unlock";
+const MCP_TOOL_NAME = "analyze_token_supply_risk";
 
 const MCP_TOOLS = [
   {
     name: MCP_TOOL_NAME,
     description:
-      "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
+      "Multi-chain token supply risk engine: historical unlocks, vesting cliffs, emission patterns, liquidity stress, and combined risk score for Ethereum, Arbitrum, BSC.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        token_symbol: {
+        token_symbol: { type: "string" as const, description: "Token ticker symbol (e.g. ETH, ARB)" },
+        chain: {
           type: "string" as const,
-          description: "Token ticker symbol (e.g. ETH, ARB)",
+          enum: ["ethereum", "arbitrum", "bsc"] as const,
+          description: "Chain to analyze; auto-detect if omitted",
+        },
+        timeframe_days: {
+          type: "number" as const,
+          description: "Analysis window in days; default 30",
         },
       },
       required: ["token_symbol"] as const,
@@ -65,10 +63,21 @@ const MCP_TOOLS = [
     outputSchema: {
       type: "object" as const,
       properties: {
-        unlock_pressure_ratio: { type: "number" as const },
-        volume_impact_ratio: { type: "number" as const },
-        supply_inflation_percent: { type: "number" as const },
-        risk_score: { type: "number" as const },
+        success: { type: "boolean" as const },
+        data: {
+          type: "object" as const,
+          properties: {
+            token: { type: "string" as const },
+            chain: { type: "string" as const },
+            supply_metrics: { type: "object" as const },
+            historical_unlock_analysis: { type: "object" as const },
+            vesting_cliff_analysis: { type: "object" as const },
+            emission_analysis: { type: "object" as const },
+            liquidity_analysis: { type: "object" as const },
+            risk_assessment: { type: "object" as const },
+          },
+        },
+        error: { type: "string" as const },
       },
     },
   },
@@ -117,24 +126,7 @@ function parseArguments(args: unknown): Record<string, unknown> {
   return {};
 }
 
-/** Map IntelligenceReport to MCP tool output schema. */
-function reportToMcpOutput(report: {
-  unlock_vs_volume_ratio: number;
-  unlock_percent_supply: number;
-  score_numeric: number;
-}): McpToolOutput {
-  const ratio = Number(report.unlock_vs_volume_ratio) || 0;
-  const supplyPct = Number(report.unlock_percent_supply) || 0;
-  const risk = Number(report.score_numeric) ?? 0;
-  return {
-    unlock_pressure_ratio: ratio,
-    volume_impact_ratio: ratio,
-    supply_inflation_percent: supplyPct,
-    risk_score: risk,
-  };
-}
-
-const TOOL_TIMEOUT_MS = 25_000;
+const TOOL_TIMEOUT_MS = 35_000;
 
 // ---------------------------------------------------------------------------
 // Method handlers
@@ -167,63 +159,51 @@ async function handleCallTool(
     return jsonRpcError(id, -32602, `Unknown tool: ${name || "(missing)"}. Supported: ${MCP_TOOL_NAME}.`);
   }
 
-  const tokenRaw =
+  const tokenSymbol =
     (args as { token_symbol?: unknown }).token_symbol ??
     (args as { tokenSymbol?: unknown }).tokenSymbol ??
     (args as { token?: unknown }).token;
-  const token = (typeof tokenRaw === "string" ? tokenRaw : tokenRaw != null ? String(tokenRaw) : "").trim();
-
+  const token = (typeof tokenSymbol === "string" ? tokenSymbol : tokenSymbol != null ? String(tokenSymbol) : "").trim();
   if (!token) {
     logger.warn({ args }, "MCP missing required argument: token_symbol");
     return jsonRpcError(id, -32602, "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH).");
   }
 
-  const symbol = token.toUpperCase();
+  const chainArg = (args as { chain?: unknown }).chain;
+  const chainSlug =
+    chainArg === "ethereum" || chainArg === "arbitrum" || chainArg === "bsc" ? chainArg : undefined;
+  const timeframeDays = typeof (args as { timeframe_days?: unknown }).timeframe_days === "number"
+    ? (args as { timeframe_days: number }).timeframe_days
+    : undefined;
 
   try {
-    const schedule = await getScheduleByToken(symbol);
-    if (!schedule) {
-      console.log("[MCP] Token not supported:", symbol);
-      logger.info({ token_symbol: symbol }, "MCP token not in registry");
-      return jsonRpcSuccess(id, {
-        success: false,
-        error: "Token not supported",
-      });
-    }
-  } catch (err) {
-    console.error("[MCP] getScheduleByToken error:", err);
-    logger.error({ err, token_symbol: symbol }, "MCP registry check failed");
-    return jsonRpcError(id, -32000, "Token lookup failed. Please try again.");
-  }
-
-  try {
-    const report = await Promise.race([
-      getIntelligenceReport(symbol, deps),
+    const result = await Promise.race([
+      runAnalyzeTokenSupplyRisk(
+        { token_symbol: token, chain: chainSlug, timeframe_days: timeframeDays },
+        deps
+      ),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
       ),
     ]);
-    const output = reportToMcpOutput({
-      unlock_vs_volume_ratio: report.unlock_vs_volume_ratio,
-      unlock_percent_supply: report.unlock_percent_supply,
-      score_numeric: report.score_numeric,
-    });
+
+    if (!result.success) {
+      return jsonRpcError(id, -32000, result.error);
+    }
+
     logger.info(
-      { tool: MCP_TOOL_NAME, token_symbol: report.token_symbol, risk_score: output.risk_score },
+      { tool: MCP_TOOL_NAME, token: result.data.token, chain: result.data.chain, risk: result.data.risk_assessment.overall_risk_score },
       "MCP callTool success"
     );
-    return jsonRpcSuccess(id, {
-      success: true,
-      data: output,
-    });
+    return jsonRpcSuccess(id, result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[MCP] callTool execution error:", err);
-    logger.error({ err, message, token: symbol }, "MCP callTool execution error");
+    logger.error({ err, message, token }, "MCP callTool execution error");
     return jsonRpcError(
       id,
       -32000,
-      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
+      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Supply risk analysis failed: ${message}.`
     );
   }
 }
