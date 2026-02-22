@@ -293,7 +293,8 @@ function computeLiquidityStressScore(
   return clamp(s, 0, 100);
 }
 
-function defaultOutput(
+/** Exported for soft-failure flat construction (no-data / business-logic failure). */
+export function defaultOutput(
   totalSupply: number,
   volume30dUsd: number,
   supplySnapshotTs?: number,

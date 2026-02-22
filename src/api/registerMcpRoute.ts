@@ -12,6 +12,7 @@ import { getIntelligenceReport } from "./mcpController.js";
 import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
 import {
   runAnalyzeTokenSupplyRisk,
+  buildSoftFailureSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
 import logger from "../core/logger.js";
@@ -496,7 +497,14 @@ async function handleAnalyzeTokenSupplyRisk(
       ),
     ]);
     if (!result.success) {
-      return jsonRpcError(id, -32000, result.error);
+      const softFailure = buildSoftFailureSupplyRisk(
+        result.error,
+        result.engine_latency_ms ?? 0
+      );
+      if (!isValidSupplyRiskResult(softFailure)) {
+        return jsonRpcError(id, -32603, "Internal result validation failed.");
+      }
+      return jsonRpcSuccess(id, softFailure);
     }
     const data = result.data;
     if (!isValidSupplyRiskResult(data)) {
@@ -510,11 +518,11 @@ async function handleAnalyzeTokenSupplyRisk(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, token }, "MCP analyze_token_supply_risk error");
-    return jsonRpcError(
-      id,
-      -32000,
-      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Supply risk analysis failed: ${message}.`
-    );
+    const softFailure = buildSoftFailureSupplyRisk(message, 0);
+    if (!isValidSupplyRiskResult(softFailure)) {
+      return jsonRpcError(id, -32603, "Internal result validation failed.");
+    }
+    return jsonRpcSuccess(id, softFailure);
   }
 }
 

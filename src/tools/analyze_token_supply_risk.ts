@@ -12,7 +12,7 @@ import { detectVestingCliffs } from "../core/vestingAnalyzer.js";
 import { analyzeEmissionPattern } from "../core/emissionModel.js";
 import { computeLiquidityStress } from "../core/liquidityAnalyzer.js";
 import { computeSupplyRiskScore } from "../core/riskEngine.js";
-import { runDynamicSupplyEngine } from "../services/dynamicSupply/index.js";
+import { runDynamicSupplyEngine, defaultOutput } from "../services/dynamicSupply/index.js";
 import {
   buildForwardRiskWithUncertainty,
   computeVolumeFusion,
@@ -114,9 +114,41 @@ export interface SupplyRiskOutput {
 export interface SupplyRiskError {
   success: false;
   error: string;
+  /** Elapsed ms when failure occurred (e.g. timeout); 0 if not applicable. */
+  engine_latency_ms?: number;
 }
 
 export type SupplyRiskResult = SupplyRiskOutput | SupplyRiskError;
+
+/**
+ * Build a valid SupplyRiskOutputFlat for business-logic failures (unsupported token, timeout, no data).
+ * Context Marketplace treats JSON-RPC errors as crashes; this returns jsonrpcSuccess with a flat object instead.
+ */
+export function buildSoftFailureSupplyRisk(
+  noResultsReason: string,
+  engine_latency_ms: number
+): SupplyRiskOutputFlat {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
+  const full: SupplyRiskOutputFlat = {
+    ...base,
+    engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
+    result_integrity_hash: "",
+    historical_depth_limited: true,
+    risk_flags: ["NO_DATA"],
+    risk_tier: "LOW",
+    data_quality_score: 0,
+    holder_data_confidence_score: 0,
+    combined_volatility_index: 0,
+    pattern_confidence_score: 0,
+    analysis_scope: "dynamic",
+  };
+  full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
+  const ext = full as unknown as Record<string, unknown>;
+  ext.no_results_reason = noResultsReason;
+  ext.has_data = false;
+  return full;
+}
 
 function num(x: unknown): number {
   if (typeof x === "number" && !Number.isNaN(x)) return x;
@@ -177,6 +209,7 @@ export async function runAnalyzeTokenSupplyRisk(
   const executionNowMs = Date.now();
 
   if (tokenAddress && chainSlug) {
+    const engineStart = Date.now();
     try {
       let volume30dUsd = 0;
       const volumeSources: number[] = [];
@@ -185,7 +218,6 @@ export async function runAnalyzeTokenSupplyRisk(
         volume30dUsd = market.volume24h * 0.85;
         if (market.volume24h > 0) volumeSources.push(volume30dUsd);
       }
-      const engineStart = Date.now();
       const result = await Promise.race([
         runDynamicSupplyEngine({
           token_address: tokenAddress,
@@ -211,11 +243,12 @@ export async function runAnalyzeTokenSupplyRisk(
       return { success: true, data: full };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, error: msg };
+      const engine_latency_ms = Math.max(0, Date.now() - engineStart);
+      return { success: false, error: msg, engine_latency_ms };
     }
   }
 
-  if (!symbol) return { success: false, error: "Token symbol or token_address is required." };
+  if (!symbol) return { success: false, error: "Token symbol or token_address is required.", engine_latency_ms: 0 };
 
   const timeframeDays = Math.max(1, Math.min(365, num(input.timeframe_days) || DEFAULT_TIMEFRAME_DAYS));
 
@@ -223,12 +256,12 @@ export async function runAnalyzeTokenSupplyRisk(
   try {
     chainIds = await getChainIdsForToken(symbol);
   } catch {
-    return { success: false, error: "Token not supported on selected chain." };
+    return { success: false, error: "Token not supported on selected chain.", engine_latency_ms: 0 };
   }
 
   const { slug: chainSlugReg, dbChainId } = resolveChain(input.chain, chainIds);
   const schedule = await getScheduleByToken(symbol, dbChainId);
-  if (!schedule) return { success: false, error: "Token not supported on selected chain." };
+  if (!schedule) return { success: false, error: "Token not supported on selected chain.", engine_latency_ms: 0 };
 
   const market = await getMarketData(symbol, schedule.coingecko_id ?? undefined, schedule.paprika_id ?? undefined);
   const circulatingSupply = Math.max(0, num(market.circulatingSupply));
