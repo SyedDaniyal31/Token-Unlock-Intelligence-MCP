@@ -1,7 +1,8 @@
 /**
  * Production MCP JSON-RPC handler for POST /mcp.
  * Context Protocol compliant: listTools, callTool (tools/list, tools/call).
- * Never returns -32603 for tool execution; uses -32000 for failures.
+ * Returns -32603 when result validation fails (internal error); uses -32000 for
+ * unresolvable/operational failures (e.g. timeout, token not supported).
  */
 
 import type { Request, Response } from "express";
@@ -82,7 +83,7 @@ const MCP_TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        token_symbol: { type: "string" as const, description: "Token ticker symbol (e.g. ETH, ARB)" },
+        token_symbol: { type: "string" as const, description: "Token ticker for registry analysis (e.g. ETH, ARB). Omit when using token_address + chain for dynamic analysis." },
         token_address: { type: "string" as const, description: "Contract address for dynamic analysis (use with chain)" },
         chain: {
           type: "string" as const,
@@ -90,36 +91,120 @@ const MCP_TOOLS = [
           description: "Chain to analyze; required when using token_address",
         },
         timeframe_days: { type: "number" as const, description: "Analysis window in days; default 30" },
+        simulation_params: {
+          type: "object" as const,
+          description: "Optional: run market shock simulation (price_shock_pct, volume_shock_pct, unlock_multiplier)",
+        },
       },
-      required: ["token_symbol"] as const,
+      required: [] as const,
+      description: "Provide token_symbol for registry analysis, or token_address + chain for dynamic analysis. At least one of (token_symbol) or (token_address and chain) is required.",
     },
     outputSchema: {
       type: "object" as const,
       properties: {
+        model_metadata: {
+          type: "object" as const,
+          properties: {
+            model_version: { type: "string" as const },
+            analytics_layer: { type: "string" as const },
+            build_timestamp: { type: "number" as const },
+          },
+          required: ["model_version", "analytics_layer", "build_timestamp"] as const,
+        },
+        data_freshness: {
+          type: "object" as const,
+          properties: {
+            supply_snapshot_timestamp: { type: "number" as const },
+            volume_snapshot_timestamp: { type: "number" as const },
+            last_rpc_block_number: { type: "number" as const },
+            block_number_used: { type: "number" as const },
+            block_timestamp_used: { type: "number" as const },
+          },
+          required: ["supply_snapshot_timestamp", "volume_snapshot_timestamp", "last_rpc_block_number", "block_number_used", "block_timestamp_used"] as const,
+        },
         inflation_rate_30d: { type: "number" as const },
+        inflation_rate_90d: { type: "number" as const },
+        supply_volatility_index: { type: "number" as const },
         emission_trend: { type: "number" as const },
         unlock_pressure_ratio: { type: "number" as const },
+        unlock_pressure_classification: { type: "string" as const },
+        fused_volume_30d_usd: { type: "number" as const },
         liquidity_stress_score: { type: "number" as const },
         cliff_detected: { type: "boolean" as const },
+        cliff_size_percent: { type: "number" as const },
         next_estimated_unlock_timestamp: { type: ["number", "null"] as const },
+        unlock_pattern_type: { type: "string" as const },
         forward_risk_curve: {
           type: "object" as const,
           properties: {
             risk_30d: { type: "number" as const },
             risk_90d: { type: "number" as const },
             risk_180d: { type: "number" as const },
+            confidence_interval_low: { type: "number" as const },
+            confidence_interval_high: { type: "number" as const },
+            model_confidence_score: { type: "number" as const },
           },
-          required: ["risk_30d", "risk_90d", "risk_180d"] as const,
+          required: ["risk_30d", "risk_90d", "risk_180d", "confidence_interval_low", "confidence_interval_high", "model_confidence_score"] as const,
         },
+        volume_source_consistency_score: { type: "number" as const },
+        top_holder_concentration_score: { type: "number" as const },
+        treasury_exposure_score: { type: "number" as const },
+        max_single_unlock_risk: { type: "number" as const },
+        liquidity_depth_profile: {
+          type: "object" as const,
+          properties: {
+            impact_1pct: { type: "number" as const },
+            impact_3pct: { type: "number" as const },
+            impact_5pct: { type: "number" as const },
+          },
+          required: ["impact_1pct", "impact_3pct", "impact_5pct"] as const,
+        },
+        emission_acceleration_score: { type: "number" as const },
+        simulation_outcome: { type: ["object", "null"] as const },
+        risk_flags: { type: "array" as const, items: { type: "string" as const } },
+        risk_tier: { type: "string" as const },
+        result_integrity_hash: { type: "string" as const },
+        engine_latency_ms: { type: "number" as const },
+        data_quality_score: { type: "number" as const },
+        historical_depth_limited: { type: "boolean" as const },
+        holder_data_confidence_score: { type: "number" as const },
+        combined_volatility_index: { type: "number" as const },
+        pattern_confidence_score: { type: "number" as const },
+        analysis_scope: { type: "string" as const, enum: ["dynamic", "registry", "hybrid"] as const },
       },
       required: [
+        "model_metadata",
+        "data_freshness",
         "inflation_rate_30d",
+        "inflation_rate_90d",
+        "supply_volatility_index",
         "emission_trend",
         "unlock_pressure_ratio",
+        "unlock_pressure_classification",
+        "fused_volume_30d_usd",
         "liquidity_stress_score",
         "cliff_detected",
+        "cliff_size_percent",
         "next_estimated_unlock_timestamp",
+        "unlock_pattern_type",
         "forward_risk_curve",
+        "volume_source_consistency_score",
+        "top_holder_concentration_score",
+        "treasury_exposure_score",
+        "max_single_unlock_risk",
+        "liquidity_depth_profile",
+        "emission_acceleration_score",
+        "simulation_outcome",
+        "risk_flags",
+        "risk_tier",
+        "result_integrity_hash",
+        "engine_latency_ms",
+        "data_quality_score",
+        "historical_depth_limited",
+        "holder_data_confidence_score",
+        "combined_volatility_index",
+        "pattern_confidence_score",
+        "analysis_scope",
       ] as const,
     },
   },
@@ -137,7 +222,7 @@ function parseBody(raw: unknown): JsonRpcRequest | null {
 
 function safeSend(res: Response, payload: JsonRpcSuccess | JsonRpcErrorBody): void {
   if (res.headersSent) {
-    console.warn("[MCP] Response already sent; skipping send");
+    logger.warn("MCP response already sent; skipping send");
     return;
   }
   res.status(200).set("Content-Type", "application/json").json(payload);
@@ -193,6 +278,9 @@ function isValidUnlockResult(value: unknown): value is UnlockResultShape {
     Number.isFinite(b) &&
     Number.isFinite(c) &&
     Number.isFinite(d) &&
+    a >= 0 &&
+    b >= 0 &&
+    c >= 0 &&
     d >= 0 &&
     d <= 100
   );
@@ -201,41 +289,117 @@ function isValidUnlockResult(value: unknown): value is UnlockResultShape {
 function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
   const o = value as Record<string, unknown>;
+  const meta = o.model_metadata;
+  const validMeta =
+    meta != null && typeof meta === "object" && !Array.isArray(meta) &&
+    typeof (meta as Record<string, unknown>).model_version === "string" &&
+    typeof (meta as Record<string, unknown>).analytics_layer === "string" &&
+    typeof (meta as Record<string, unknown>).build_timestamp === "number" &&
+    Number.isFinite((meta as Record<string, unknown>).build_timestamp as number);
+  const fresh = o.data_freshness;
+  const validFresh =
+    fresh != null && typeof fresh === "object" && !Array.isArray(fresh) &&
+    typeof (fresh as Record<string, unknown>).supply_snapshot_timestamp === "number" && Number.isFinite((fresh as Record<string, unknown>).supply_snapshot_timestamp as number) &&
+    typeof (fresh as Record<string, unknown>).volume_snapshot_timestamp === "number" && Number.isFinite((fresh as Record<string, unknown>).volume_snapshot_timestamp as number) &&
+    typeof (fresh as Record<string, unknown>).last_rpc_block_number === "number" && Number.isFinite((fresh as Record<string, unknown>).last_rpc_block_number as number) &&
+    typeof (fresh as Record<string, unknown>).block_number_used === "number" && Number.isFinite((fresh as Record<string, unknown>).block_number_used as number) &&
+    typeof (fresh as Record<string, unknown>).block_timestamp_used === "number" && Number.isFinite((fresh as Record<string, unknown>).block_timestamp_used as number);
   const curve = o.forward_risk_curve;
   if (curve == null || typeof curve !== "object" || Array.isArray(curve)) return false;
   const c = curve as Record<string, unknown>;
   const r30 = c.risk_30d;
   const r90 = c.risk_90d;
   const r180 = c.risk_180d;
+  const ciLow = c.confidence_interval_low;
+  const ciHigh = c.confidence_interval_high;
+  const modelConf = c.model_confidence_score;
   const validCurve =
-    typeof r30 === "number" &&
-    typeof r90 === "number" &&
-    typeof r180 === "number" &&
-    Number.isFinite(r30) &&
-    Number.isFinite(r90) &&
-    Number.isFinite(r180) &&
-    r30 >= 0 &&
-    r30 <= 100 &&
-    r90 >= 0 &&
-    r90 <= 100 &&
-    r180 >= 0 &&
-    r180 <= 100;
+    typeof r30 === "number" && Number.isFinite(r30) && r30 >= 0 && r30 <= 100 &&
+    typeof r90 === "number" && Number.isFinite(r90) && r90 >= 0 && r90 <= 100 &&
+    typeof r180 === "number" && Number.isFinite(r180) && r180 >= 0 && r180 <= 100 &&
+    typeof ciLow === "number" && Number.isFinite(ciLow) && ciLow >= 0 && ciLow <= 100 &&
+    typeof ciHigh === "number" && Number.isFinite(ciHigh) && ciHigh >= 0 && ciHigh <= 100 &&
+    typeof modelConf === "number" && Number.isFinite(modelConf) && modelConf >= 0 && modelConf <= 100;
   const nextTs = o.next_estimated_unlock_timestamp;
   const validNextTs = nextTs === null || (typeof nextTs === "number" && Number.isFinite(nextTs));
+  const depth = o.liquidity_depth_profile;
+  const validDepth =
+    depth != null && typeof depth === "object" && !Array.isArray(depth) &&
+    typeof (depth as Record<string, unknown>).impact_1pct === "number" && Number.isFinite((depth as Record<string, unknown>).impact_1pct as number) &&
+    typeof (depth as Record<string, unknown>).impact_3pct === "number" && Number.isFinite((depth as Record<string, unknown>).impact_3pct as number) &&
+    typeof (depth as Record<string, unknown>).impact_5pct === "number" && Number.isFinite((depth as Record<string, unknown>).impact_5pct as number);
+  const sim = o.simulation_outcome;
+  const validSim =
+    sim === null ||
+    (typeof sim === "object" && !Array.isArray(sim) &&
+      typeof (sim as Record<string, unknown>).price_shock_impact_score === "number" && Number.isFinite((sim as Record<string, unknown>).price_shock_impact_score as number) &&
+      typeof (sim as Record<string, unknown>).volume_shock_impact_score === "number" && Number.isFinite((sim as Record<string, unknown>).volume_shock_impact_score as number) &&
+      typeof (sim as Record<string, unknown>).unlock_multiplier_impact_score === "number" && Number.isFinite((sim as Record<string, unknown>).unlock_multiplier_impact_score as number));
+  const vCons = o.volume_source_consistency_score;
+  const topHold = o.top_holder_concentration_score;
+  const emitAcc = o.emission_acceleration_score;
+  const riskFlags = o.risk_flags;
+  const validRiskFlags = Array.isArray(riskFlags) && riskFlags.every((f) => typeof f === "string");
+  const riskTier = o.risk_tier;
+  const validRiskTier = typeof riskTier === "string";
+  const hash = o.result_integrity_hash;
+  const validHash = typeof hash === "string";
+  const latency = o.engine_latency_ms;
+  const validLatency = typeof latency === "number" && Number.isFinite(latency) && latency >= 0;
+  const dq = o.data_quality_score;
+  const validDataQuality = typeof dq === "number" && Number.isFinite(dq) && (dq as number) >= 0 && (dq as number) <= 100;
+  const histLimited = o.historical_depth_limited;
+  const validHistLimited = typeof histLimited === "boolean";
+  const holderConf = o.holder_data_confidence_score;
+  const validHolderConf = typeof holderConf === "number" && Number.isFinite(holderConf) && (holderConf as number) >= 0 && (holderConf as number) <= 100;
+  const combinedVol = o.combined_volatility_index;
+  const validCombinedVol = typeof combinedVol === "number" && Number.isFinite(combinedVol) && (combinedVol as number) >= 0 && (combinedVol as number) <= 100;
+  const patternConf = o.pattern_confidence_score;
+  const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
+  const scope = o.analysis_scope;
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid";
+  const inf90 = o.inflation_rate_90d;
+  const volIdx = o.supply_volatility_index;
+  const pressureClass = o.unlock_pressure_classification;
+  const fusedVol = o.fused_volume_30d_usd;
+  const cliffPct = o.cliff_size_percent;
+  const patternType = o.unlock_pattern_type;
+  const treasuryExp = o.treasury_exposure_score;
+  const maxUnlock = o.max_single_unlock_risk;
   return (
-    typeof o.inflation_rate_30d === "number" &&
-    Number.isFinite(o.inflation_rate_30d as number) &&
-    typeof o.emission_trend === "number" &&
-    Number.isFinite(o.emission_trend as number) &&
-    typeof o.unlock_pressure_ratio === "number" &&
-    Number.isFinite(o.unlock_pressure_ratio as number) &&
-    typeof o.liquidity_stress_score === "number" &&
-    Number.isFinite(o.liquidity_stress_score as number) &&
-    (o.liquidity_stress_score as number) >= 0 &&
-    (o.liquidity_stress_score as number) <= 100 &&
+    validMeta &&
+    validFresh &&
+    typeof o.inflation_rate_30d === "number" && Number.isFinite(o.inflation_rate_30d as number) &&
+    typeof inf90 === "number" && Number.isFinite(inf90 as number) &&
+    typeof volIdx === "number" && Number.isFinite(volIdx as number) && (volIdx as number) >= 0 && (volIdx as number) <= 100 &&
+    typeof o.emission_trend === "number" && Number.isFinite(o.emission_trend as number) &&
+    typeof o.unlock_pressure_ratio === "number" && Number.isFinite(o.unlock_pressure_ratio as number) &&
+    typeof pressureClass === "string" &&
+    typeof fusedVol === "number" && Number.isFinite(fusedVol as number) && (fusedVol as number) >= 0 &&
+    typeof o.liquidity_stress_score === "number" && Number.isFinite(o.liquidity_stress_score as number) &&
+    (o.liquidity_stress_score as number) >= 0 && (o.liquidity_stress_score as number) <= 100 &&
     typeof o.cliff_detected === "boolean" &&
+    typeof cliffPct === "number" && Number.isFinite(cliffPct as number) && (cliffPct as number) >= 0 && (cliffPct as number) <= 100 &&
     validNextTs &&
-    validCurve
+    typeof patternType === "string" &&
+    validCurve &&
+    typeof vCons === "number" && Number.isFinite(vCons as number) && (vCons as number) >= 0 && (vCons as number) <= 100 &&
+    typeof topHold === "number" && Number.isFinite(topHold as number) && (topHold as number) >= 0 && (topHold as number) <= 100 &&
+    typeof treasuryExp === "number" && Number.isFinite(treasuryExp as number) && (treasuryExp as number) >= 0 && (treasuryExp as number) <= 100 &&
+    typeof maxUnlock === "number" && Number.isFinite(maxUnlock as number) && (maxUnlock as number) >= 0 && (maxUnlock as number) <= 100 &&
+    validDepth &&
+    typeof emitAcc === "number" && Number.isFinite(emitAcc as number) && (emitAcc as number) >= 0 && (emitAcc as number) <= 100 &&
+    validSim &&
+    validRiskFlags &&
+    validRiskTier &&
+    validHash &&
+    validLatency &&
+    validDataQuality &&
+    validHistLimited &&
+    validHolderConf &&
+    validCombinedVol &&
+    validPatternConf &&
+    validScope
   );
 }
 
@@ -306,6 +470,15 @@ async function handleAnalyzeTokenSupplyRisk(
     args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? args.chain : undefined;
   const timeframeDays = typeof args.timeframe_days === "number" ? args.timeframe_days : undefined;
   const tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
+  const rawSim = args.simulation_params;
+  let simulation_params: { price_shock_pct?: number; volume_shock_pct?: number; unlock_multiplier?: number } | undefined;
+  if (rawSim != null && typeof rawSim === "object" && !Array.isArray(rawSim)) {
+    const s = rawSim as Record<string, unknown>;
+    simulation_params = {};
+    if (typeof s.price_shock_pct === "number" && Number.isFinite(s.price_shock_pct)) simulation_params.price_shock_pct = s.price_shock_pct;
+    if (typeof s.volume_shock_pct === "number" && Number.isFinite(s.volume_shock_pct)) simulation_params.volume_shock_pct = s.volume_shock_pct;
+    if (typeof s.unlock_multiplier === "number" && Number.isFinite(s.unlock_multiplier)) simulation_params.unlock_multiplier = s.unlock_multiplier;
+  }
   try {
     const result = await Promise.race([
       runAnalyzeTokenSupplyRisk(
@@ -314,6 +487,7 @@ async function handleAnalyzeTokenSupplyRisk(
           token_address: tokenAddress,
           chain: chainSlug,
           timeframe_days: timeframeDays,
+          simulation_params,
         },
         deps
       ),
@@ -350,7 +524,7 @@ async function handleCallTool(
   deps: UnlockIntelligenceDeps | null | undefined
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
   if (!deps || typeof deps.chainProvider === "undefined" || typeof deps.marketProvider === "undefined") {
-    console.error("[MCP] handleCallTool: deps or required deps fields are undefined");
+    logger.error("MCP handleCallTool: deps or required deps fields are undefined");
     return jsonRpcError(id, -32000, "Server configuration error. Please try again later.");
   }
 
@@ -373,14 +547,14 @@ async function handleCallTool(
 
   if (name === UNLOCK_TOOL_NAME) {
     if (!token) {
-      logger.warn({ args }, "MCP missing required argument: token_symbol");
+      logger.warn({ tool: name }, "MCP missing required argument: token_symbol");
       return jsonRpcError(id, -32602, "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH).");
     }
     return handleAnalyzeTokenUnlock(id, token.toUpperCase(), deps);
   }
   if (name === SUPPLY_RISK_TOOL_NAME) {
     if (!token && !tokenAddressArg) {
-      logger.warn({ args }, "MCP missing token_symbol or token_address");
+      logger.warn({ tool: name }, "MCP missing token_symbol or token_address");
       return jsonRpcError(id, -32602, "Missing required argument: token_symbol or token_address. For dynamic analysis provide token_address and chain.");
     }
     return handleAnalyzeTokenSupplyRisk(id, token, args, deps);
@@ -411,8 +585,9 @@ export function registerMcpRoute(
     try {
       const body = parseBody(req.body);
 
-      console.log("[MCP] Incoming request body:", body != null ? JSON.stringify(body, null, 2) : "(null/undefined)");
-      logger.info({ body }, "MCP POST body");
+      if (process.env.NODE_ENV !== "production" && body != null) {
+        logger.debug({ method: body.method }, "MCP call received");
+      }
 
       if (!body) {
         safeSend(res, jsonRpcError(null, -32600, "Invalid Request: body must be a JSON object."));
@@ -421,9 +596,6 @@ export function registerMcpRoute(
 
       const { jsonrpc, id, method, params } = body;
       const requestId = id ?? null;
-
-      console.log("[MCP] Parsed method:", method);
-      console.log("[MCP] Parsed params:", params != null ? JSON.stringify(params) : "(null/undefined)");
 
       if (jsonrpc !== "2.0") {
         safeSend(res, jsonRpcError(requestId, -32600, "Invalid Request: jsonrpc must be '2.0'."));
@@ -457,7 +629,6 @@ export function registerMcpRoute(
       safeSend(res, jsonRpcError(requestId, -32601, `Method not found: ${methodName}.`));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[MCP] Unhandled error:", err);
       logger.error({ err, message }, "MCP POST unhandled error");
       const errorMessage =
         process.env.NODE_ENV === "production"

@@ -5,5 +5,4 @@ export {
   runDynamicSupplyEngine,
   type DynamicSupplyInput,
   type DynamicSupplyOutput,
-  type ForwardRiskCurve,
 } from "./dynamicSupplyEngine.js";

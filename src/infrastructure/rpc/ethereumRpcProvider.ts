@@ -173,9 +173,9 @@ export class EthereumRpcProvider implements ChainProvider {
   }
 
   /**
-   * Latest block number via eth_blockNumber. Used to apply reorg-safe cap.
+   * Latest block number via eth_blockNumber. For chain freshness metadata.
    */
-  private async getLatestBlockNumber(): Promise<number> {
+  async getLatestBlockNumber(): Promise<number> {
     const hex = await this.rpc<string>("eth_blockNumber", []);
     return parseBlockNumber(typeof hex === "string" ? hex : "0x0");
   }

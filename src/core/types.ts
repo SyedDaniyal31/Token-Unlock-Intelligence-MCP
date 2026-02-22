@@ -182,6 +182,8 @@ export interface ChainProvider {
     toBlock: number
   ): Promise<RawChainLog[]>;
   getBlock(blockNumber: number): Promise<RawChainBlock | null>;
+  /** Optional: latest block number (for chain freshness metadata). */
+  getLatestBlockNumber?(): Promise<number>;
   getTokenTransfers?(
     tokenAddress: string,
     fromBlock: number,
