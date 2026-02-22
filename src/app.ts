@@ -239,37 +239,51 @@ type AnalyzeTokenUnlockOutput = {
 const mcpTransports: Record<string, StreamableHTTPServerTransport> = {};
 const verifyContextAuth = createContextMiddleware();
 
+/** True if body looks like a valid JSON-RPC 2.0 request (has jsonrpc and method or id). No REST-style validation. */
+function isJsonRpcRequest(body: unknown): body is { jsonrpc?: string; method?: string; id?: unknown } {
+  return (
+    body != null &&
+    typeof body === "object" &&
+    (body as { jsonrpc?: string }).jsonrpc === "2.0" &&
+    ("method" in (body as object) || "id" in (body as object))
+  );
+}
+
+function createAndRegisterTransport(): StreamableHTTPServerTransport {
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (id) => {
+      mcpTransports[id] = transport;
+      logger.info({ sessionId: id }, "MCP session initialized");
+    },
+  });
+  transport.onclose = () => {
+    if (transport.sessionId) {
+      delete mcpTransports[transport.sessionId];
+      logger.info({ sessionId: transport.sessionId }, "MCP session closed");
+    }
+  };
+  return transport;
+}
+
 app.post(
   "/mcp",
   verifyContextAuth,
   asyncHandler(async (req: Request, res: Response): Promise<void> => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    let transport: StreamableHTTPServerTransport;
+    let transport: StreamableHTTPServerTransport | undefined = sessionId ? mcpTransports[sessionId] : undefined;
 
-    if (sessionId && mcpTransports[sessionId]) {
-      transport = mcpTransports[sessionId];
-    } else if (!sessionId && isInitializeRequest(req.body)) {
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => {
-          mcpTransports[id] = transport;
-          logger.info({ sessionId: id }, "MCP session initialized");
-        },
-      });
-      transport.onclose = () => {
-        if (transport.sessionId) {
-          delete mcpTransports[transport.sessionId];
-          logger.info({ sessionId: transport.sessionId }, "MCP session closed");
-        }
-      };
+    if (!transport) {
+      if (!isJsonRpcRequest(req.body)) {
+        res.status(200).json({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32600, message: "Invalid Request: JSON-RPC body required" },
+        });
+        return;
+      }
+      transport = createAndRegisterTransport();
       await mcpServer.connect(transport);
-    } else {
-      res.status(400).json({
-        jsonrpc: "2.0",
-        error: { code: -32000, message: "Invalid session. Send initialize request first." },
-        id: null,
-      });
-      return;
     }
 
     await transport.handleRequest(req, res, req.body);
@@ -278,12 +292,24 @@ app.post(
 
 app.get("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
   const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  const transport = sessionId ? mcpTransports[sessionId] : undefined;
-  if (transport) {
-    await transport.handleRequest(req, res);
-  } else {
-    res.status(400).json({ error: "Invalid session" });
+  let transport: StreamableHTTPServerTransport | undefined = sessionId ? mcpTransports[sessionId] : undefined;
+
+  if (!transport) {
+    const accept = (req.headers.accept ?? "").toLowerCase();
+    if (accept.includes("text/event-stream")) {
+      transport = createAndRegisterTransport();
+      await mcpServer.connect(transport);
+    } else {
+      res.status(200).json({
+        ok: true,
+        protocol: "mcp",
+        message: "Send POST with JSON-RPC (initialize, tools/list, tools/call) or GET with Accept: text/event-stream and mcp-session-id.",
+      });
+      return;
+    }
   }
+
+  await transport.handleRequest(req, res);
 });
 
 app.delete("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
@@ -292,7 +318,7 @@ app.delete("/mcp", verifyContextAuth, async (req: Request, res: Response): Promi
   if (transport) {
     await transport.handleRequest(req, res);
   } else {
-    res.status(400).json({ error: "Invalid session" });
+    res.status(200).json({ jsonrpc: "2.0", id: null, result: null });
   }
 });
 
