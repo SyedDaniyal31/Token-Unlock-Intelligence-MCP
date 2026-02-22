@@ -150,6 +150,27 @@ const mcpServer = new Server(
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS }));
 
+const MCP_TOOL_NAME = "analyze_token_unlock";
+
+/** Normalize params.arguments: may be object or JSON string from client. */
+function parseToolArguments(
+  args: unknown
+): Record<string, unknown> {
+  if (args == null) return {};
+  if (typeof args === "object" && !Array.isArray(args)) return args as Record<string, unknown>;
+  if (typeof args === "string") {
+    try {
+      const parsed = JSON.parse(args) as unknown;
+      return parsed != null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 mcpServer.setRequestHandler(
   CallToolRequestSchema,
   async (request: CallToolRequest): Promise<CallToolResult> => {
@@ -175,19 +196,46 @@ mcpServer.setRequestHandler(
     });
 
     try {
-      const { name, arguments: args } = request.params;
+      const params = request?.params ?? {};
+      const name = typeof (params as { name?: unknown }).name === "string"
+        ? (params as { name: string }).name
+        : "";
+      const rawArgs = (params as { arguments?: unknown }).arguments;
+      const args = parseToolArguments(rawArgs);
+
+      logger.info(
+        {
+          mcp: "tools/call",
+          request: {
+            method: (request as { method?: string }).method,
+            params: { name, arguments: args },
+          },
+        },
+        "MCP callTool request"
+      );
+
+      if (name !== MCP_TOOL_NAME) {
+        logger.warn({ name, allowed: MCP_TOOL_NAME }, "Unknown tool");
+        return errorResult(`Unknown tool: ${name || "(missing)"}. Supported: ${MCP_TOOL_NAME}.`);
+      }
+
       const raw =
-        args?.token_symbol ?? (args as { tokenSymbol?: string } | undefined)?.tokenSymbol ?? "ARB";
-      const tokenSymbol = (typeof raw === "string" ? raw : String(raw ?? "")).trim() || "ARB";
+        args?.token_symbol ??
+        (args as { tokenSymbol?: string }).tokenSymbol;
+      const tokenSymbol = (typeof raw === "string" ? raw : raw != null ? String(raw) : "").trim();
 
-      if (name !== "analyze_token_unlock") return errorResult(`Unknown tool: ${name}`);
+      if (!tokenSymbol) {
+        logger.warn({ args }, "Missing required argument: token_symbol");
+        return errorResult(
+          "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH)."
+        );
+      }
 
-      const symbol = tokenSymbol || "ARB";
       const TOOL_TIMEOUT_MS = 25_000;
 
       try {
         const report = await Promise.race([
-          getIntelligenceReport(symbol, deps),
+          getIntelligenceReport(tokenSymbol, deps),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
           ),
@@ -205,7 +253,10 @@ mcpServer.setRequestHandler(
           risk_summary: String(rawContent.risk_summary ?? ""),
           fetchedAt: String(rawContent.fetchedAt ?? new Date().toISOString()),
         };
-        logger.info({ tool: "analyze_token_unlock", token_symbol: report.token_symbol, impact_score: report.impact_score });
+        logger.info(
+          { tool: MCP_TOOL_NAME, token_symbol: report.token_symbol, impact_score: report.impact_score },
+          "analyze_token_unlock success"
+        );
         return successResult(structuredContent);
       } catch (innerErr) {
         const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
@@ -213,12 +264,12 @@ mcpServer.setRequestHandler(
         const summary = message.includes("timed out")
           ? "Analysis timed out; try again or use a different token."
           : `Unlock analysis failed: ${message}.`;
-        return successResult(safeOutput(symbol, summary));
+        return successResult(safeOutput(tokenSymbol, summary));
       }
     } catch (outerErr) {
       const message = outerErr instanceof Error ? outerErr.message : String(outerErr);
-      logger.error({ err: outerErr, message }, "analyze_token_unlock unexpected error");
-      return successResult(safeOutput("", `Server error: ${message}. Please try again.`));
+      logger.error({ err: outerErr, message }, "MCP callTool unexpected error");
+      return errorResult(`Server error: ${message}. Please try again.`);
     }
   }
 );
@@ -286,6 +337,10 @@ app.post(
       await mcpServer.connect(transport);
     }
 
+    const body = req.body as { method?: string; params?: unknown };
+    if (body?.method === "tools/call") {
+      logger.info({ mcpRequestBody: body }, "MCP incoming JSON-RPC request (tools/call)");
+    }
     await transport.handleRequest(req, res, req.body);
   })
 );
