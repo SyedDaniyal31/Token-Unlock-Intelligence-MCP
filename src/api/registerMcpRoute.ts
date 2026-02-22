@@ -9,7 +9,8 @@ import type { Request, Response } from "express";
 import type { RequestHandler } from "express";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import { getIntelligenceReport } from "./mcpController.js";
-import { getScheduleByToken } from "../ingestion/unlockRegistry.js";
+import { getScheduleByTokenCaseInsensitive } from "../ingestion/unlockRegistry.js";
+import { resolveTokenBySymbol, createUnlockTokenRegistry } from "../utils/tokenResolver.js";
 import {
   runAnalyzeTokenSupplyRisk,
   buildSoftFailureSupplyRisk,
@@ -433,13 +434,18 @@ async function handleAnalyzeTokenUnlock(
   symbol: string,
   deps: UnlockIntelligenceDeps
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
-  const schedule = await getScheduleByToken(symbol);
+  const registry = createUnlockTokenRegistry();
+  const resolved = await resolveTokenBySymbol(symbol, registry);
+  if (!resolved) {
+    return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
+  }
+  const schedule = await getScheduleByTokenCaseInsensitive(resolved.symbol, resolved.chain);
   if (!schedule) {
-    return jsonRpcError(id, -32000, "Token not supported");
+    return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
   }
   try {
     const report = await Promise.race([
-      getIntelligenceReport(symbol, deps),
+      getIntelligenceReport(resolved.symbol, deps),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
       ),
@@ -554,13 +560,19 @@ async function handleCallTool(
     : "";
 
   if (name === UNLOCK_TOOL_NAME) {
+    if (typeof tokenSymbol !== "string" && tokenSymbol != null) {
+      return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
+    }
     if (!token) {
       logger.warn({ tool: name }, "MCP missing required argument: token_symbol");
       return jsonRpcError(id, -32602, "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH).");
     }
-    return handleAnalyzeTokenUnlock(id, token.toUpperCase(), deps);
+    return handleAnalyzeTokenUnlock(id, token, deps);
   }
   if (name === SUPPLY_RISK_TOOL_NAME) {
+    if (tokenSymbol != null && typeof tokenSymbol !== "string") {
+      return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
+    }
     if (!token && !tokenAddressArg) {
       logger.warn({ tool: name }, "MCP missing token_symbol or token_address");
       return jsonRpcError(id, -32602, "Missing required argument: token_symbol or token_address. For dynamic analysis provide token_address and chain.");

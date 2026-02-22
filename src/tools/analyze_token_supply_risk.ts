@@ -3,7 +3,8 @@
  */
 
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
-import { getScheduleByToken, getChainIdsForToken, getUnlockEventsInRange } from "../ingestion/unlockRegistry.js";
+import { getScheduleByTokenCaseInsensitive, getUnlockEventsInRange } from "../ingestion/unlockRegistry.js";
+import { resolveTokenBySymbol, createUnlockTokenRegistry } from "../utils/tokenResolver.js";
 import { getMarketData } from "../market/MarketAggregator.js";
 import { computeSellableSupply } from "../intelligence/sellableSupply.js";
 import { buildSupplyMetrics } from "../core/supplyAnalyzer.js";
@@ -161,37 +162,11 @@ function str(x: unknown): string {
   return x != null ? String(x) : "";
 }
 
-/** Resolve display slug (ethereum|arbitrum|bsc) and DB chain_id. */
-function resolveChain(
-  requestedChain: string | undefined,
-  chainIdsFromRegistry: string[]
-): { slug: string; dbChainId: string } {
-  const preferred = (requestedChain ?? "").toLowerCase().trim();
-  const wantBsc = preferred === "bsc" || preferred === "bnb";
-  const wantArbitrum = preferred === "arbitrum";
-  const wantEthereum = preferred === "ethereum" || !preferred;
-
-  if (wantEthereum && (chainIdsFromRegistry.includes("ethereum") || chainIdsFromRegistry.length === 0)) {
-    return { slug: "ethereum", dbChainId: "ethereum" };
-  }
-  if (wantArbitrum && chainIdsFromRegistry.includes("arbitrum")) {
-    return { slug: "arbitrum", dbChainId: "arbitrum" };
-  }
-  if (wantBsc) {
-    const bscId = chainIdsFromRegistry.includes("bsc") ? "bsc" : chainIdsFromRegistry.includes("bnb") ? "bnb" : "bsc";
-    return { slug: "bsc", dbChainId: bscId };
-  }
-
-  const first = chainIdsFromRegistry[0] ?? "ethereum";
-  const slug = first === "bnb" ? "bsc" : first === "ethereum" || first === "arbitrum" || first === "bsc" ? first : "ethereum";
-  return { slug, dbChainId: first };
-}
-
 export async function runAnalyzeTokenSupplyRisk(
   input: SupplyRiskInput,
   deps: UnlockIntelligenceDeps
 ): Promise<SupplyRiskResult> {
-  const symbol = str(input.token_symbol).trim().toUpperCase();
+  let symbol = str(input.token_symbol).trim().toUpperCase();
   const tokenAddress = str(input.token_address).trim();
   const chainSlug = input.chain === "ethereum" || input.chain === "arbitrum" || input.chain === "bsc" ? input.chain : undefined;
 
@@ -250,18 +225,25 @@ export async function runAnalyzeTokenSupplyRisk(
 
   if (!symbol) return { success: false, error: "Token symbol or token_address is required.", engine_latency_ms: 0 };
 
-  const timeframeDays = Math.max(1, Math.min(365, num(input.timeframe_days) || DEFAULT_TIMEFRAME_DAYS));
-
-  let chainIds: string[];
-  try {
-    chainIds = await getChainIdsForToken(symbol);
-  } catch {
-    return { success: false, error: "Token not supported on selected chain.", engine_latency_ms: 0 };
+  const registry = createUnlockTokenRegistry();
+  const resolved = await resolveTokenBySymbol(str(input.token_symbol), registry);
+  if (!resolved) {
+    return {
+      success: false,
+      error: "Token not supported on ethereum, bsc, or arbitrum",
+      engine_latency_ms: 0,
+    };
   }
 
-  const { slug: chainSlugReg, dbChainId } = resolveChain(input.chain, chainIds);
-  const schedule = await getScheduleByToken(symbol, dbChainId);
-  if (!schedule) return { success: false, error: "Token not supported on selected chain.", engine_latency_ms: 0 };
+  const canonicalSymbol = resolved.symbol;
+  const dbChainId = resolved.chain;
+  const schedule = await getScheduleByTokenCaseInsensitive(canonicalSymbol, dbChainId);
+  if (!schedule) {
+    return { success: false, error: "Token not supported on ethereum, bsc, or arbitrum", engine_latency_ms: 0 };
+  }
+
+  symbol = canonicalSymbol;
+  const timeframeDays = Math.max(1, Math.min(365, num(input.timeframe_days) || DEFAULT_TIMEFRAME_DAYS));
 
   const market = await getMarketData(symbol, schedule.coingecko_id ?? undefined, schedule.paprika_id ?? undefined);
   const circulatingSupply = Math.max(0, num(market.circulatingSupply));

@@ -142,6 +142,54 @@ export async function getUnlockEventsInRange(
   return result.rows;
 }
 
+/** Case-insensitive schedule lookup by symbol (any case) and optional chain. */
+export async function getScheduleByTokenCaseInsensitive(
+  tokenSymbol: string,
+  chainId?: string
+): Promise<TokenMetadata | null> {
+  const effectiveChainId = chainId ?? "ethereum";
+  const result = await query<{
+    token_symbol: string;
+    contract_address: string;
+    beneficiary_label: string;
+    total_allocation: string;
+    vesting_start: Date | null;
+    vesting_cliff: Date | null;
+    vesting_end: Date | null;
+    release_frequency: string | null;
+    last_verified_block: string | null;
+    vesting_type: string | null;
+    chain_id: string | null;
+    coingecko_id: string | null;
+    paprika_id: string | null;
+  }>(
+    `SELECT token_symbol, contract_address, beneficiary_label, total_allocation,
+            vesting_start, vesting_cliff, vesting_end, release_frequency,
+            last_verified_block::TEXT, vesting_type, chain_id, coingecko_id, paprika_id
+     FROM unlock_schedules
+     WHERE UPPER(TRIM(token_symbol)) = UPPER(TRIM($1)) AND COALESCE(chain_id, 'ethereum') = $2
+     LIMIT 1`,
+    [tokenSymbol, effectiveChainId]
+  );
+  const r = result.rows[0];
+  if (!r) return null;
+  return {
+    token_symbol: r.token_symbol,
+    contract_address: r.contract_address,
+    beneficiary_label: r.beneficiary_label,
+    total_allocation: r.total_allocation,
+    vesting_start: r.vesting_start,
+    vesting_cliff: r.vesting_cliff,
+    vesting_end: r.vesting_end,
+    release_frequency: r.release_frequency,
+    last_verified_block: r.last_verified_block,
+    vesting_type: r.vesting_type ?? undefined,
+    chain_id: r.chain_id ?? undefined,
+    coingecko_id: r.coingecko_id ?? undefined,
+    paprika_id: r.paprika_id ?? undefined,
+  };
+}
+
 export async function getScheduleByToken(
   tokenSymbol: string,
   chainId?: string
