@@ -1,18 +1,8 @@
 import "dotenv/config";
-import { randomUUID } from "node:crypto";
-import express, { type Request, type Response, type NextFunction } from "express";
+import express, { type Request, type Response } from "express";
 import cors from "cors";
 import cron from "node-cron";
 import { createContextMiddleware } from "@ctxprotocol/sdk";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-  type CallToolResult,
-  type CallToolRequest,
-  isInitializeRequest,
-} from "@modelcontextprotocol/sdk/types.js";
 import type { Server as HttpServer } from "http";
 import { config } from "./core/config.js";
 import logger from "./core/logger.js";
@@ -22,10 +12,10 @@ import { EthereumRpcProvider } from "./infrastructure/rpc/ethereumRpcProvider.js
 import { StubMarketProvider, CoinGeckoMarketProvider } from "./infrastructure/market/marketProvider.js";
 import { CachingMarketProvider } from "./infrastructure/market/marketCache.js";
 import { DefaultExchangeRegistry } from "./infrastructure/exchanges/exchangeRegistry.js";
-import { registerHealthRoute, registerIntelligenceRoute, registerRiskRoute, registerDiagnosticsRoute, registerMarketRoute, getIntelligenceReport, reportToLegacyShape } from "./api/routes.js";
+import { registerHealthRoute, registerIntelligenceRoute, registerRiskRoute, registerDiagnosticsRoute, registerMarketRoute } from "./api/routes.js";
+import { registerMcpRoute } from "./api/registerMcpRoute.js";
 import { requestIdMiddleware } from "./middleware/requestId.js";
 import { globalRateLimiter } from "./middleware/rateLimiter.js";
-import { asyncHandler } from "./middleware/asyncHandler.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
@@ -82,300 +72,16 @@ app.get("/", (_req: Request, res: Response): void => {
   });
 });
 
-app.get("/mcp", (req: Request, res: Response, next: NextFunction): void => {
-  const accept = (req.headers.accept ?? "").toLowerCase();
-  if (accept.includes("text/event-stream")) {
-    next();
-    return;
-  }
+app.get("/mcp", (_req: Request, res: Response): void => {
   res.status(200).json({
     ok: true,
     protocol: "mcp",
-    message: "MCP endpoint; use POST for JSON-RPC (e.g. initialize, tools/list, tools/call).",
-    transports: ["streamable-http"],
+    message: "POST JSON-RPC: initialize, listTools (or tools/list), callTool (or tools/call).",
   });
 });
 
-/** Tool definitions with outputSchema (Context Protocol compliant). See: https://github.com/ctxprotocol/sdk/tree/main/examples/server */
-const MCP_TOOLS = [
-  {
-    name: "analyze_token_unlock",
-    description:
-      "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        token_symbol: {
-          type: "string" as const,
-          description: "Token ticker symbol (e.g. ETH, ARB)",
-          default: "ARB",
-        },
-      },
-      required: ["token_symbol"] as const,
-    },
-    outputSchema: {
-      type: "object" as const,
-      properties: {
-        token_symbol: { type: "string" as const },
-        next_unlock_date: { type: "string" as const },
-        unlock_amount: { type: "number" as const },
-        unlock_percent_supply: { type: "number" as const },
-        unlock_vs_volume_ratio: { type: "number" as const },
-        cohort_type: { type: "string" as const },
-        historical_avg_7d_return: { type: "number" as const },
-        impact_score: { type: "string" as const },
-        risk_summary: { type: "string" as const },
-        fetchedAt: { type: "string" as const },
-      },
-      required: [
-        "token_symbol",
-        "next_unlock_date",
-        "unlock_amount",
-        "unlock_percent_supply",
-        "unlock_vs_volume_ratio",
-        "cohort_type",
-        "historical_avg_7d_return",
-        "impact_score",
-        "risk_summary",
-        "fetchedAt",
-      ] as const,
-    },
-  },
-];
-
-const mcpServer = new Server(
-  { name: "token-unlock-intelligence-mcp", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
-
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: MCP_TOOLS }));
-
-const MCP_TOOL_NAME = "analyze_token_unlock";
-
-/** Normalize params.arguments: may be object or JSON string from client. */
-function parseToolArguments(
-  args: unknown
-): Record<string, unknown> {
-  if (args == null) return {};
-  if (typeof args === "object" && !Array.isArray(args)) return args as Record<string, unknown>;
-  if (typeof args === "string") {
-    try {
-      const parsed = JSON.parse(args) as unknown;
-      return parsed != null && typeof parsed === "object" && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : {};
-    } catch {
-      return {};
-    }
-  }
-  return {};
-}
-
-mcpServer.setRequestHandler(
-  CallToolRequestSchema,
-  async (request: CallToolRequest): Promise<CallToolResult> => {
-    const safeOutput = (sym: string, summary: string): AnalyzeTokenUnlockOutput => ({
-      token_symbol: sym,
-      next_unlock_date: "",
-      unlock_amount: 0,
-      unlock_percent_supply: 0,
-      unlock_vs_volume_ratio: 0,
-      cohort_type: "",
-      historical_avg_7d_return: 0,
-      impact_score: "error",
-      risk_summary: summary,
-      fetchedAt: new Date().toISOString(),
-    });
-    const successResult = (data: AnalyzeTokenUnlockOutput): CallToolResult => ({
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-      structuredContent: data,
-    });
-    const errorResult = (message: string): CallToolResult => ({
-      content: [{ type: "text", text: JSON.stringify({ error: message }) }],
-      isError: true,
-    });
-
-    try {
-      const params = request?.params ?? {};
-      const name = typeof (params as { name?: unknown }).name === "string"
-        ? (params as { name: string }).name
-        : "";
-      const rawArgs = (params as { arguments?: unknown }).arguments;
-      const args = parseToolArguments(rawArgs);
-
-      logger.info(
-        {
-          mcp: "tools/call",
-          request: {
-            method: (request as { method?: string }).method,
-            params: { name, arguments: args },
-          },
-        },
-        "MCP callTool request"
-      );
-
-      if (name !== MCP_TOOL_NAME) {
-        logger.warn({ name, allowed: MCP_TOOL_NAME }, "Unknown tool");
-        return errorResult(`Unknown tool: ${name || "(missing)"}. Supported: ${MCP_TOOL_NAME}.`);
-      }
-
-      const raw =
-        args?.token_symbol ??
-        (args as { tokenSymbol?: string }).tokenSymbol;
-      const tokenSymbol = (typeof raw === "string" ? raw : raw != null ? String(raw) : "").trim();
-
-      if (!tokenSymbol) {
-        logger.warn({ args }, "Missing required argument: token_symbol");
-        return errorResult(
-          "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH)."
-        );
-      }
-
-      const TOOL_TIMEOUT_MS = 25_000;
-
-      try {
-        const report = await Promise.race([
-          getIntelligenceReport(tokenSymbol, deps),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-          ),
-        ]);
-        const rawContent = reportToLegacyShape(report);
-        const structuredContent: AnalyzeTokenUnlockOutput = {
-          token_symbol: String(rawContent.token_symbol ?? ""),
-          next_unlock_date: String(rawContent.next_unlock_date ?? ""),
-          unlock_amount: Number(rawContent.unlock_amount) || 0,
-          unlock_percent_supply: Number(rawContent.unlock_percent_supply) || 0,
-          unlock_vs_volume_ratio: Number(rawContent.unlock_vs_volume_ratio) || 0,
-          cohort_type: String(rawContent.cohort_type ?? ""),
-          historical_avg_7d_return: Number(rawContent.historical_avg_7d_return) || 0,
-          impact_score: String(rawContent.impact_score ?? ""),
-          risk_summary: String(rawContent.risk_summary ?? ""),
-          fetchedAt: String(rawContent.fetchedAt ?? new Date().toISOString()),
-        };
-        logger.info(
-          { tool: MCP_TOOL_NAME, token_symbol: report.token_symbol, impact_score: report.impact_score },
-          "analyze_token_unlock success"
-        );
-        return successResult(structuredContent);
-      } catch (innerErr) {
-        const message = innerErr instanceof Error ? innerErr.message : String(innerErr);
-        logger.error({ err: innerErr, message }, "analyze_token_unlock error");
-        const summary = message.includes("timed out")
-          ? "Analysis timed out; try again or use a different token."
-          : `Unlock analysis failed: ${message}.`;
-        return successResult(safeOutput(tokenSymbol, summary));
-      }
-    } catch (outerErr) {
-      const message = outerErr instanceof Error ? outerErr.message : String(outerErr);
-      logger.error({ err: outerErr, message }, "MCP callTool unexpected error");
-      return errorResult(`Server error: ${message}. Please try again.`);
-    }
-  }
-);
-
-type AnalyzeTokenUnlockOutput = {
-  token_symbol: string;
-  next_unlock_date: string;
-  unlock_amount: number;
-  unlock_percent_supply: number;
-  unlock_vs_volume_ratio: number;
-  cohort_type: string;
-  historical_avg_7d_return: number;
-  impact_score: string;
-  risk_summary: string;
-  fetchedAt: string;
-};
-
-const mcpTransports: Record<string, StreamableHTTPServerTransport> = {};
 const verifyContextAuth = createContextMiddleware();
-
-/** True if body looks like a valid JSON-RPC 2.0 request (has jsonrpc and method or id). No REST-style validation. */
-function isJsonRpcRequest(body: unknown): body is { jsonrpc?: string; method?: string; id?: unknown } {
-  return (
-    body != null &&
-    typeof body === "object" &&
-    (body as { jsonrpc?: string }).jsonrpc === "2.0" &&
-    ("method" in (body as object) || "id" in (body as object))
-  );
-}
-
-function createAndRegisterTransport(): StreamableHTTPServerTransport {
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    onsessioninitialized: (id) => {
-      mcpTransports[id] = transport;
-      logger.info({ sessionId: id }, "MCP session initialized");
-    },
-  });
-  transport.onclose = () => {
-    if (transport.sessionId) {
-      delete mcpTransports[transport.sessionId];
-      logger.info({ sessionId: transport.sessionId }, "MCP session closed");
-    }
-  };
-  return transport;
-}
-
-app.post(
-  "/mcp",
-  verifyContextAuth,
-  asyncHandler(async (req: Request, res: Response): Promise<void> => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    let transport: StreamableHTTPServerTransport | undefined = sessionId ? mcpTransports[sessionId] : undefined;
-
-    if (!transport) {
-      if (!isJsonRpcRequest(req.body)) {
-        res.status(200).json({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32600, message: "Invalid Request: JSON-RPC body required" },
-        });
-        return;
-      }
-      transport = createAndRegisterTransport();
-      await mcpServer.connect(transport);
-    }
-
-    const body = req.body as { method?: string; params?: unknown };
-    if (body?.method === "tools/call") {
-      logger.info({ mcpRequestBody: body }, "MCP incoming JSON-RPC request (tools/call)");
-    }
-    await transport.handleRequest(req, res, req.body);
-  })
-);
-
-app.get("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  let transport: StreamableHTTPServerTransport | undefined = sessionId ? mcpTransports[sessionId] : undefined;
-
-  if (!transport) {
-    const accept = (req.headers.accept ?? "").toLowerCase();
-    if (accept.includes("text/event-stream")) {
-      transport = createAndRegisterTransport();
-      await mcpServer.connect(transport);
-    } else {
-      res.status(200).json({
-        ok: true,
-        protocol: "mcp",
-        message: "Send POST with JSON-RPC (initialize, tools/list, tools/call) or GET with Accept: text/event-stream and mcp-session-id.",
-      });
-      return;
-    }
-  }
-
-  await transport.handleRequest(req, res);
-});
-
-app.delete("/mcp", verifyContextAuth, async (req: Request, res: Response): Promise<void> => {
-  const sessionId = req.headers["mcp-session-id"] as string | undefined;
-  const transport = sessionId ? mcpTransports[sessionId] : undefined;
-  if (transport) {
-    await transport.handleRequest(req, res);
-  } else {
-    res.status(200).json({ jsonrpc: "2.0", id: null, result: null });
-  }
-});
+registerMcpRoute(app, deps, [verifyContextAuth]);
 
 app.use(errorHandler);
 
@@ -409,7 +115,6 @@ export async function shutdown(): Promise<void> {
   if (httpServer) {
     httpServer.close();
   }
-  await Promise.all(Object.values(mcpTransports).map((t) => t.close()));
   await closePool();
   process.exit(0);
 }
