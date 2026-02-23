@@ -16,6 +16,7 @@ import {
   buildSoftFailureSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
+import { fetchCoinGeckoData } from "../services/marketData/coingeckoClient.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -488,10 +489,11 @@ async function handleAnalyzeTokenSupplyRisk(
   args: Record<string, unknown>,
   deps: UnlockIntelligenceDeps
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
-  const chainSlug =
-    args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? args.chain : undefined;
+  type ChainSlug = "ethereum" | "arbitrum" | "bsc";
+  let chainSlug: ChainSlug | undefined =
+    args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? (args.chain as ChainSlug) : undefined;
   const timeframeDays = typeof args.timeframe_days === "number" ? args.timeframe_days : undefined;
-  const tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
+  let tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
   const rawSim = args.simulation_params;
   let simulation_params: { price_shock_pct?: number; volume_shock_pct?: number; unlock_multiplier?: number } | undefined;
   if (rawSim != null && typeof rawSim === "object" && !Array.isArray(rawSim)) {
@@ -501,6 +503,20 @@ async function handleAnalyzeTokenSupplyRisk(
     if (typeof s.volume_shock_pct === "number" && Number.isFinite(s.volume_shock_pct)) simulation_params.volume_shock_pct = s.volume_shock_pct;
     if (typeof s.unlock_multiplier === "number" && Number.isFinite(s.unlock_multiplier)) simulation_params.unlock_multiplier = s.unlock_multiplier;
   }
+
+  // Symbol-only upgrade: try CoinGecko resolution → dynamic engine; fallback to registry
+  if (token && !tokenAddress) {
+    try {
+      const cgData = await fetchCoinGeckoData(token);
+      if (cgData?.address && cgData?.platform_chain) {
+        tokenAddress = cgData.address;
+        chainSlug = cgData.platform_chain as ChainSlug;
+      }
+    } catch {
+      // Silent fail — fallback to registry (tokenAddress and chainSlug remain undefined)
+    }
+  }
+
   try {
     const result = await Promise.race([
       runAnalyzeTokenSupplyRisk(

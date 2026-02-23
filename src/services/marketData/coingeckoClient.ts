@@ -5,8 +5,12 @@
 const REQUEST_TIMEOUT_MS = 3000;
 const COIN_LIST_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
+export type CoinGeckoSupportedChain = "ethereum" | "bsc" | "arbitrum";
+
 export interface CoinGeckoMarketData {
   address: string | null;
+  /** When address is set, the chain that address belongs to (priority: ethereum → bsc → arbitrum). */
+  platform_chain?: CoinGeckoSupportedChain | null;
   circulatingSupply: number | null;
   marketCapUsd: number | null;
   volume24hUsd: number | null;
@@ -159,6 +163,19 @@ function firstPlatformAddress(platforms: unknown): string | null {
   return null;
 }
 
+/** First supported chain (ethereum → bsc → arbitrum) with a contract address; for symbol-only resolution. */
+function firstSupportedChainAndAddress(platforms: unknown): { chain: CoinGeckoSupportedChain; address: string } | null {
+  if (platforms == null || typeof platforms !== "object") return null;
+  const obj = platforms as Record<string, unknown>;
+  const supportedChains: CoinGeckoSupportedChain[] = ["ethereum", "bsc", "arbitrum"];
+  for (const chain of supportedChains) {
+    const key = COINGECKO_CHAIN_KEYS[chain] ?? chain;
+    const v = obj[key];
+    if (typeof v === "string" && v.trim() !== "") return { chain, address: v.trim() };
+  }
+  return null;
+}
+
 export async function fetchCoinGeckoData(symbol: string): Promise<CoinGeckoMarketData | null> {
   const id = await resolveBestCoinGeckoId(symbol, ["ethereum", "bsc", "arbitrum"]);
   if (id == null || id === "") return null;
@@ -190,10 +207,13 @@ export async function fetchCoinGeckoData(symbol: string): Promise<CoinGeckoMarke
     ? toFiniteNumber((md.current_price as { usd?: unknown }).usd)
     : null;
 
-  const address = firstPlatformAddress(raw.platforms);
+  const chainAndAddr = firstSupportedChainAndAddress(raw.platforms);
+  const address = chainAndAddr ? chainAndAddr.address : firstPlatformAddress(raw.platforms);
+  const platform_chain = chainAndAddr ? chainAndAddr.chain : null;
 
   return {
     address,
+    platform_chain: address ? platform_chain ?? null : null,
     circulatingSupply,
     marketCapUsd,
     volume24hUsd,

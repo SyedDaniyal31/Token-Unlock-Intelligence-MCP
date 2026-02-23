@@ -1,0 +1,25 @@
+{
+  "routing_correct": true,
+  "legacy_handler_detected": false,
+  "duplicate_tool_definition": false,
+  "schema_mismatch": false,
+  "ui_cache_issue": true,
+  "dynamic_engine_reachable": true,
+  "root_cause": "The server does not emit { token, numeric_fields, raw_data } anywhere. The MCP route for analyze_token_supply_risk calls runAnalyzeTokenSupplyRisk → returns result.data (SupplyRiskOutputFlat) → jsonRpcSuccess(id, data). The UI is displaying a structure (token, numeric_fields, raw_data) that this codebase never produces. The cause is either: (1) the Alex/platform UI cached an old tool definition or result schema that used token/numeric_fields/raw_data; (2) the platform uses a fixed display template that maps tool results into token + numeric_fields + raw_data and no mapping was added for the new flat fields; or (3) a proxy/gateway in front of this server transforms responses into that shape.",
+  "required_fix": "1) Confirm server response: Call POST /mcp with method 'callTool' or 'tools/call', params.name = 'analyze_token_supply_risk', params.arguments = { token_symbol: 'ARB' }. Verify response.result contains liquidity_stress_score, risk_tier, model_metadata, forward_risk_curve, and optionally unlock_amount_usd, market_cap_usd. 2) If server response is correct: Re-register the MCP server with the Alex platform so it fetches the current listTools (outputSchema is already the flat structure). Clear any platform-side cache of the tool definition. Update the UI or platform display layer to consume the flat result (e.g. show liquidity_stress_score, risk_tier, risk_flags, forward_risk_curve) instead of expecting token/numeric_fields/raw_data. 3) If a proxy transforms the response: Update or bypass the proxy so the flat result is passed through unchanged.",
+  "audit_details": {
+    "step1_references": [
+      { "file": "src/api/registerMcpRoute.ts", "lines": "18, 49, 415-538, 647", "role": "Tool definition (MCP_TOOLS), handler (handleAnalyzeTokenSupplyRisk), switch (handleCallTool), error log" },
+      { "file": "docs/RISK_ENGINE_ARCHITECTURE.md", "lines": "9, 61", "role": "Documentation" },
+      { "file": "src/api/mcpResultAggregator.ts", "lines": "59, 84-91", "role": "Constant and pass-through of supplyRiskResponse.result (no reshape)" }
+    ],
+    "step2_routing": "registerMcpRoute.ts: name === SUPPLY_RISK_TOOL_NAME → handleAnalyzeTokenSupplyRisk → runAnalyzeTokenSupplyRisk (from analyze_token_supply_risk.js). runAnalyzeTokenSupplyRisk uses runDynamicSupplyEngine for token_address+chain path and registry path for symbol-only. No old unlock engine, no numeric_fields wrapper. Return is jsonRpcSuccess(id, data) with data = SupplyRiskOutputFlat.",
+    "step3_return_flow": "runAnalyzeTokenSupplyRisk returns { success: true, data: SupplyRiskOutputFlat } | { success: false, error, engine_latency_ms }. On success, handler uses result.data; on failure, buildSoftFailureSupplyRisk then same. isValidSupplyRiskResult(data) validates; then jsonRpcSuccess(id, data). Result passed to client is the flat object.",
+    "step4_legacy_structures": "No occurrences of numeric_fields, raw_data, or fullResults in the project. No legacy path in supply risk flow.",
+    "step5_tool_definition": "Single definition in registerMcpRoute.ts MCP_TOOLS array (name: analyze_token_supply_risk). outputSchema is the full flat structure (model_metadata, data_freshness, liquidity_stress_score, risk_tier, forward_risk_curve, etc.). No numeric_fields, no nested wrapper, no array-based result.",
+    "step6_dynamic_path": "token_address + chain → runAnalyzeTokenSupplyRisk uses tokenAddress && chainSlug branch → runDynamicSupplyEngine. token_symbol only → registry resolution then registry path (buildRegistrySupplyRiskOutput). Both paths return SupplyRiskOutputFlat. Symbol-based and address-based both return the same flat shape; no divergent legacy handler.",
+    "step7_trace_location": "Insert console.log('SUPPLY_RISK_HANDLER_USED'); at start of handleAnalyzeTokenSupplyRisk (e.g. line 401 in registerMcpRoute.ts). If log does not print when invoking analyze_token_supply_risk, the request is not reaching this handler (wrong method name or wrong route).",
+    "step8_direct_api": "Expected response shape for POST /mcp with method 'callTool', params: { name: 'analyze_token_supply_risk', arguments: { token_symbol: 'ARB' } }: result must be the flat object with liquidity_stress_score, risk_tier, model_metadata, forward_risk_curve, risk_flags, and optionally unlock_amount_usd, market_cap_usd. If response contains these, server is correct and the UI/platform is outdated or caching.",
+    "step9_platform_schema_cache": "Tool definition in this repo has no token, numeric_fields, or raw_data. If the UI shows only token, numeric_fields, raw_data, the platform has either cached an old tool definition (from before the flat schema) or uses a fixed display template that was never updated to the flat schema. Flag: PLATFORM_SCHEMA_CACHE / UI display layer not aligned with current outputSchema."
+  }
+}
