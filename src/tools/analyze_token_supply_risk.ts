@@ -50,6 +50,7 @@ import {
   setCachedResult,
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
+import { fetchCoinGeckoData } from "../services/marketData/coingeckoClient.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_TIMEFRAME_DAYS = 30;
@@ -234,8 +235,8 @@ export async function runAnalyzeTokenSupplyRisk(
 ): Promise<SupplyRiskResult> {
   const analysisTimestamp = new Date().toISOString();
   let symbol = str(input.token_symbol).trim().toUpperCase();
-  const tokenAddress = str(input.token_address).trim();
-  const chainSlug = input.chain === "ethereum" || input.chain === "arbitrum" || input.chain === "bsc" ? input.chain : undefined;
+  let tokenAddress = str(input.token_address).trim();
+  let chainSlug = input.chain === "ethereum" || input.chain === "arbitrum" || input.chain === "bsc" ? input.chain : undefined;
 
   const cacheParams: SupplyRiskCacheParams = {
     token_symbol: (symbol || input.token_symbol?.trim()) ?? "",
@@ -275,6 +276,22 @@ export async function runAnalyzeTokenSupplyRisk(
 
   const executionNowMs = Date.now();
 
+  // Resolve symbol → canonical chain + contract so dynamic engine runs (e.g. ONDO on ETH/BSC).
+  if (symbol && (!tokenAddress || !chainSlug)) {
+    try {
+      const cgData = await fetchCoinGeckoData(symbol);
+      if (cgData?.address && cgData?.platform_chain) {
+        if (!tokenAddress) tokenAddress = cgData.address.trim();
+        if (!chainSlug) {
+          const chain = cgData.platform_chain;
+          if (chain === "ethereum" || chain === "arbitrum" || chain === "bsc") chainSlug = chain;
+        }
+      }
+    } catch {
+      // Leave tokenAddress/chainSlug unchanged; fall through to registry or NO_DATA
+    }
+  }
+
   if (tokenAddress && chainSlug) {
     const engineStart = Date.now();
     try {
@@ -307,6 +324,14 @@ export async function runAnalyzeTokenSupplyRisk(
         analysis_timestamp: analysisTimestamp,
         engine_version: ENGINE_VERSION,
         data_freshness_seconds: 0,
+        search_exhausted: false,
+        records_found: 1,
+        no_results_reason: undefined,
+        coverage: {
+          registry_checked: false,
+          dynamic_checked: true,
+          records_found: 1,
+        },
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       setCachedResult(cacheKey, full);
@@ -436,6 +461,14 @@ export async function runAnalyzeTokenSupplyRisk(
     analysisTimestamp,
   });
   flat.result_integrity_hash = computeResultIntegrityHash(flat as unknown as Record<string, unknown>) || "";
+  flat.search_exhausted = false;
+  flat.records_found = Math.max(1, eventRows.length);
+  flat.no_results_reason = undefined;
+  flat.coverage = {
+    registry_checked: true,
+    dynamic_checked: false,
+    records_found: Math.max(1, eventRows.length),
+  };
   setCachedResult(cacheKey, flat);
   if (flat == null || (Array.isArray(flat) && flat.length === 0)) {
     const noData = buildStructuredNoDataSupplyRisk(
