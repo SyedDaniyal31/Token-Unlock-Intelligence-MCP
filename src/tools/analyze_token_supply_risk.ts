@@ -50,7 +50,7 @@ import {
   setCachedResult,
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
-import { fetchCoinGeckoData } from "../services/marketData/coingeckoClient.js";
+import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
 import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
@@ -284,8 +284,8 @@ export async function runAnalyzeTokenSupplyRisk(
       if (cgData?.address && cgData?.platform_chain) {
         if (!tokenAddress) tokenAddress = cgData.address.trim();
         if (!chainSlug) {
-          const chain = cgData.platform_chain;
-          if (chain === "ethereum" || chain === "arbitrum" || chain === "bsc") chainSlug = chain;
+          const slug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
+          if (slug) chainSlug = slug;
         }
       }
     } catch {

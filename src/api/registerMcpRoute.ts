@@ -16,7 +16,7 @@ import {
   buildSoftFailureSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
-import { fetchCoinGeckoData } from "../services/marketData/coingeckoClient.js";
+import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -592,11 +592,11 @@ async function handleAnalyzeTokenUnlock(
   try {
     const cgData = await fetchCoinGeckoData(symbolToResolve);
     if (cgData?.address && cgData?.platform_chain) {
-      const chain = cgData.platform_chain;
-      if (chain === "ethereum" || chain === "arbitrum" || chain === "bsc") {
+      const chainSlug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
+      if (chainSlug) {
         const supplyResult = await Promise.race([
           runAnalyzeTokenSupplyRisk(
-            { token_symbol: symbolToResolve, token_address: cgData.address, chain },
+            { token_symbol: symbolToResolve, token_address: cgData.address, chain: chainSlug },
             deps
           ),
           new Promise<never>((_, reject) =>
@@ -635,7 +635,7 @@ async function handleAnalyzeTokenSupplyRisk(
     args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? (args.chain as ChainSlug) : undefined;
   const timeframeDays = typeof args.timeframe_days === "number" ? args.timeframe_days : undefined;
   let tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
-  logger.error({ token }, "SUPPLY_HANDLER_ENTERED");
+  logger.error({ token: token || undefined, token_address: tokenAddress, chain: chainSlug }, "SUPPLY_HANDLER_ENTERED");
   const rawSim = args.simulation_params;
   let simulation_params: { price_shock_pct?: number; volume_shock_pct?: number; unlock_multiplier?: number } | undefined;
   if (rawSim != null && typeof rawSim === "object" && !Array.isArray(rawSim)) {
@@ -652,7 +652,8 @@ async function handleAnalyzeTokenSupplyRisk(
       const cgData = await fetchCoinGeckoData(token);
       if (cgData?.address && cgData?.platform_chain) {
         tokenAddress = cgData.address;
-        chainSlug = cgData.platform_chain as ChainSlug;
+        const slug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
+        if (slug) chainSlug = slug;
       }
     } catch {
       // Silent fail — fallback to registry (tokenAddress and chainSlug remain undefined)

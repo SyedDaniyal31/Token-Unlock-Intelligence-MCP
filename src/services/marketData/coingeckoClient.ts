@@ -7,6 +7,15 @@ const COIN_LIST_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 export type CoinGeckoSupportedChain = "ethereum" | "bsc" | "arbitrum";
 
+/** Normalize any CoinGecko-style chain string to our supported slug (handles "Ethereum", "ethereum-mainnet", "binance-smart-chain", "arbitrum-one", etc.). */
+export function normalizeCoinGeckoChainToSlug(chain: unknown): CoinGeckoSupportedChain | undefined {
+  const normalized = String(chain ?? "").toLowerCase();
+  if (normalized.includes("ethereum")) return "ethereum";
+  if (normalized.includes("arbitrum")) return "arbitrum";
+  if (normalized.includes("bsc") || normalized.includes("binance") || normalized.includes("bnb")) return "bsc";
+  return undefined;
+}
+
 export interface CoinGeckoMarketData {
   address: string | null;
   /** When address is set, the chain that address belongs to (priority: ethereum → bsc → arbitrum). */
