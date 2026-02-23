@@ -6,6 +6,7 @@
 import { getChainProvider } from "../../infrastructure/rpc/chainProviderFactory.js";
 import { readErc20Supply } from "./erc20ChainReader.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
+import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,
@@ -27,6 +28,7 @@ import {
   type ForwardRiskCurveExtended,
   type LiquidityDepthProfile,
   type SimulationOutcome,
+  type UnlockPatternType,
 } from "../../core/quantitativeAnalytics.js";
 
 const REQUEST_TIMEOUT_MS = 8000;
@@ -144,14 +146,39 @@ export async function runDynamicSupplyEngine(
 
   const supplySafe = Math.max(1, totalSupply);
   const volume30d = Math.max(0, toNum(input.volume30dUsd));
-  const unlockPressureRatio =
+  let unlockPressureRatio =
     volume30d > 0 && totalSupply > 0
       ? supplySafe / volume30d
       : 0;
-  const pressureRatioClean = Number.isFinite(unlockPressureRatio) ? Math.max(0, unlockPressureRatio) : 0;
-  const inflation30d = 0;
+  let inflation30d = 0;
+  let inflation90d = 0;
+  let cliffDetected = false;
+  let unlockPatternType: UnlockPatternType = "unknown";
+  let supplyVolatilityIndex = 0;
+  let emissionAcceleration = 0;
+
+  const unlockScannerResult = await runUnlockScanner({
+    chain: input.chain,
+    tokenAddress: addr,
+    circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
+    volume30dUsd: volume30d,
+    price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
+    executionNowMs,
+    deadlineMs: deadline,
+  });
+  if (unlockScannerResult && Date.now() < deadline) {
+    inflation30d = Number(unlockScannerResult.inflationRate30d);
+    inflation90d = Number(unlockScannerResult.inflationRate90d);
+    unlockPressureRatio = Number(unlockScannerResult.unlockPressureRatio);
+    cliffDetected = Boolean(unlockScannerResult.cliffDetected);
+    const pt = unlockScannerResult.unlockPatternType;
+    unlockPatternType = (pt === "linear" || pt === "burst" ? pt : "unknown") as UnlockPatternType;
+    supplyVolatilityIndex = Number(unlockScannerResult.supplyVolatilityIndex);
+    emissionAcceleration = Number(unlockScannerResult.emissionAccelerationScore);
+  }
+  if (Number.isFinite(unlockPressureRatio) === false) unlockPressureRatio = 0;
+  const pressureRatioClean = Math.max(0, unlockPressureRatio);
   const emissionTrend = 0;
-  const cliffDetected = false;
   const cliffPct = 0;
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, inflation30d, cliffPct);
   const nextUnlockTs: number | null = null;
@@ -165,10 +192,11 @@ export async function runDynamicSupplyEngine(
     : volume30d > 0 ? [volume30d] : [];
   const { fused_volume_30d_usd, volume_source_consistency_score } = computeVolumeFusion(volumeSources);
   const volumeVariance = 1 - Math.min(100, Math.max(0, volume_source_consistency_score)) / 100;
-  const inflation90d = inflation30d * 3;
-  const supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
+  if (!Number.isFinite(inflation90d)) inflation90d = inflation30d * 3;
+  if (unlockScannerResult == null) {
+    supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
+  }
   const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
-  const unlockPatternType = computeUnlockPatternType([]);
 
   const forwardCurve = buildForwardRiskWithUncertainty(risk30d, risk90d, risk180d, {
     volatilityHint: pressureRatioClean > 0.5 ? 0.4 : 0.2,
@@ -191,7 +219,9 @@ export async function runDynamicSupplyEngine(
     unlockPressureRatio: pressureRatioClean,
   });
 
-  const emissionAcceleration = computeEmissionAcceleration([]);
+  if (unlockScannerResult == null) {
+    emissionAcceleration = computeEmissionAcceleration([]);
+  }
 
   let simulation_outcome: SimulationOutcome | null = null;
   if (input.simulation_params && Object.keys(input.simulation_params).length > 0) {
