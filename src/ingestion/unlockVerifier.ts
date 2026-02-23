@@ -127,10 +127,14 @@ export async function verifyUnlocksOnChain(
   for (const schedule of schedules) {
     const chainId = schedule.chain_id ?? "ethereum";
     const chainProvider = getProvider(chainId);
+    if (!chainProvider) continue;
+
+    const contractAddress = (schedule.contract_address ?? "").trim();
+    if (!contractAddress || contractAddress === "0x0000000000000000000000000000000000000000") continue;
 
     try {
       if (chainProvider.call) {
-        const detection = await detectVestingContract(schedule.contract_address, chainProvider);
+        const detection = await detectVestingContract(contractAddress, chainProvider);
         if (detection.vestingType !== "unknown") {
           await updateVestingType(schedule.token_symbol, schedule.contract_address, detection.vestingType, chainId);
         }
@@ -139,13 +143,13 @@ export async function verifyUnlocksOnChain(
       const fromBlock = Math.max(0, parseInt(schedule.last_verified_block ?? "0", 10));
       const toBlock = fromBlock + 1000;
       const logs = await chainProvider.getLogs(
-        schedule.contract_address,
+        contractAddress,
         fromBlock,
         toBlock
       );
       const events = parseLogsToEvents(
         schedule.token_symbol,
-        schedule.contract_address,
+        contractAddress,
         logs
       );
 

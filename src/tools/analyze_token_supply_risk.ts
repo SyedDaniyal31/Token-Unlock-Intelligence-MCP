@@ -154,6 +154,8 @@ export function buildSoftFailureSupplyRisk(
   const ext = full as unknown as Record<string, unknown>;
   ext.no_results_reason = noResultsReason;
   ext.has_data = false;
+  ext.searchExhausted = true;
+  ext.noResultsReason = "no_matching_data";
   return full;
 }
 

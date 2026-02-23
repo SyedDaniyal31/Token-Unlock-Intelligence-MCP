@@ -74,7 +74,7 @@ export async function detectVestingContract(
     endTimestamp: null,
   };
 
-  const call = chainProvider.call;
+  const call = chainProvider.call?.bind(chainProvider);
   if (!call) return out;
 
   const safeCall = async (data: string): Promise<string> => {

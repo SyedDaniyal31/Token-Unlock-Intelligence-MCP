@@ -700,6 +700,9 @@ export function registerMcpRoute(
       if (!response || typeof response !== "object" || !("jsonrpc" in response)) {
         response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_ROUTER_RESPONSE", 0));
       }
+      if ("result" in response && Array.isArray((response as JsonRpcSuccess).result)) {
+        response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("EMPTY_RESULT", 0));
+      }
       safeSend(res, response);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
