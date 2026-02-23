@@ -55,6 +55,9 @@ const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_TIMEFRAME_DAYS = 30;
 const DYNAMIC_ENGINE_TIMEOUT_MS = 8000;
 
+/** Increment manually on major logic changes. Do not read from package.json at runtime. */
+const ENGINE_VERSION = "1.2.0";
+
 export interface SupplyRiskInput {
   token_symbol: string;
   token_address?: string;
@@ -116,6 +119,10 @@ export interface SupplyRiskOutputFlat {
   records_found?: number;
   no_results_reason?: string;
   coverage?: { registry_checked: boolean; dynamic_checked: boolean; records_found: number };
+  /** Metadata credibility: always set on every success response. */
+  analysis_timestamp: string;
+  engine_version: string;
+  data_freshness_seconds: number;
 }
 
 export interface SupplyRiskOutput {
@@ -141,6 +148,7 @@ export function buildSoftFailureSupplyRisk(
   engine_latency_ms: number
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
+  const ts = new Date().toISOString();
   const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
   const full: SupplyRiskOutputFlat = {
     ...base,
@@ -154,6 +162,9 @@ export function buildSoftFailureSupplyRisk(
     combined_volatility_index: 0,
     pattern_confidence_score: 0,
     analysis_scope: "dynamic",
+    analysis_timestamp: ts,
+    engine_version: ENGINE_VERSION,
+    data_freshness_seconds: 0,
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   const ext = full as unknown as Record<string, unknown>;
@@ -172,7 +183,9 @@ export function buildStructuredNoDataSupplyRisk(
   token_symbol: string,
   analysisScope: "dynamic" | "registry",
   no_results_reason: string,
-  engine_latency_ms = 0
+  engine_latency_ms: number,
+  analysisTimestamp: string,
+  dataFreshnessSeconds: number
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
   const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
@@ -196,6 +209,9 @@ export function buildStructuredNoDataSupplyRisk(
       dynamic_checked: analysisScope === "dynamic",
       records_found: 0,
     },
+    analysis_timestamp: analysisTimestamp,
+    engine_version: ENGINE_VERSION,
+    data_freshness_seconds: Math.max(0, Number.isFinite(dataFreshnessSeconds) ? dataFreshnessSeconds : 0),
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   return full;
@@ -216,6 +232,7 @@ export async function runAnalyzeTokenSupplyRisk(
   input: SupplyRiskInput,
   deps: UnlockIntelligenceDeps
 ): Promise<SupplyRiskResult> {
+  const analysisTimestamp = new Date().toISOString();
   let symbol = str(input.token_symbol).trim().toUpperCase();
   const tokenAddress = str(input.token_address).trim();
   const chainSlug = input.chain === "ethereum" || input.chain === "arbitrum" || input.chain === "bsc" ? input.chain : undefined;
@@ -236,11 +253,24 @@ export async function runAnalyzeTokenSupplyRisk(
         symbol || tokenAddress || str(input.token_symbol) || "unknown",
         scope,
         "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+        0,
+        analysisTimestamp,
         0
       );
       return { success: true, data: noData };
     }
-    return { success: true, data: cached };
+    const nowSec = Math.floor(new Date(analysisTimestamp).getTime() / 1000);
+    const dataFreshnessSeconds = Math.max(
+      0,
+      nowSec - (cached.data_freshness?.supply_snapshot_timestamp ?? 0)
+    );
+    const enriched = {
+      ...cached,
+      analysis_timestamp: analysisTimestamp,
+      engine_version: ENGINE_VERSION,
+      data_freshness_seconds: dataFreshnessSeconds,
+    };
+    return { success: true, data: enriched };
   }
 
   const executionNowMs = Date.now();
@@ -274,6 +304,9 @@ export async function runAnalyzeTokenSupplyRisk(
         ...result,
         engine_latency_ms,
         result_integrity_hash: "",
+        analysis_timestamp: analysisTimestamp,
+        engine_version: ENGINE_VERSION,
+        data_freshness_seconds: 0,
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       setCachedResult(cacheKey, full);
@@ -282,7 +315,9 @@ export async function runAnalyzeTokenSupplyRisk(
           symbol || tokenAddress || "unknown",
           "dynamic",
           "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
-          engine_latency_ms
+          engine_latency_ms,
+          analysisTimestamp,
+          0
         );
         return { success: true, data: noData };
       }
@@ -382,6 +417,7 @@ export async function runAnalyzeTokenSupplyRisk(
     eventTimestamps: eventRows.map((r) => r.timestamp),
     simulation_params: input.simulation_params,
     executionNowMs,
+    analysisTimestamp,
   });
   flat.result_integrity_hash = computeResultIntegrityHash(flat as unknown as Record<string, unknown>) || "";
   setCachedResult(cacheKey, flat);
@@ -390,6 +426,8 @@ export async function runAnalyzeTokenSupplyRisk(
       symbol,
       "registry",
       "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+      0,
+      analysisTimestamp,
       0
     );
     return { success: true, data: noData };
@@ -410,6 +448,7 @@ function mapRegistryResultToFlat(
     eventTimestamps?: (Date | null)[];
     simulation_params?: SupplyRiskInput["simulation_params"];
     executionNowMs: number;
+    analysisTimestamp: string;
   }
 ): SupplyRiskOutputFlat {
   const nextTs = vesting.next_cliff_date
@@ -552,6 +591,9 @@ function mapRegistryResultToFlat(
     combined_volatility_index: Math.min(100, Math.max(0, combinedVolatilityIndex)),
     pattern_confidence_score: Math.min(100, Math.max(0, patternConfidenceScore)),
     analysis_scope: "registry",
+    analysis_timestamp: context.analysisTimestamp,
+    engine_version: ENGINE_VERSION,
+    data_freshness_seconds: 0,
   };
 }
 

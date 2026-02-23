@@ -195,6 +195,18 @@ const MCP_TOOLS = [
           },
           required: ["registry_checked", "dynamic_checked", "records_found"] as const,
         },
+        analysis_timestamp: {
+          type: "string" as const,
+          description: "ISO timestamp when analysis was generated.",
+        },
+        engine_version: {
+          type: "string" as const,
+          description: "Version of the supply risk engine used.",
+        },
+        data_freshness_seconds: {
+          type: "number" as const,
+          description: "How many seconds old the underlying data is.",
+        },
       },
       required: [
         "model_metadata",
@@ -229,6 +241,9 @@ const MCP_TOOLS = [
         "combined_volatility_index",
         "pattern_confidence_score",
         "analysis_scope",
+        "analysis_timestamp",
+        "engine_version",
+        "data_freshness_seconds",
       ] as const,
     },
   },
@@ -414,6 +429,12 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const validUnlockMarketCapImpact = unlockMarketCapImpact === undefined || (typeof unlockMarketCapImpact === "number" && Number.isFinite(unlockMarketCapImpact) && unlockMarketCapImpact >= 0);
   const unlockAmountUsd = o.unlock_amount_usd;
   const validUnlockAmountUsd = unlockAmountUsd === undefined || (typeof unlockAmountUsd === "number" && Number.isFinite(unlockAmountUsd) && unlockAmountUsd >= 0);
+  const analysisTimestamp = o.analysis_timestamp;
+  const validAnalysisTimestamp = typeof analysisTimestamp === "string" && analysisTimestamp.length > 0;
+  const engineVersion = o.engine_version;
+  const validEngineVersion = typeof engineVersion === "string" && engineVersion.length > 0;
+  const dataFreshnessSeconds = o.data_freshness_seconds;
+  const validDataFreshnessSeconds = typeof dataFreshnessSeconds === "number" && Number.isFinite(dataFreshnessSeconds) && dataFreshnessSeconds >= 0;
   const inf90 = o.inflation_rate_90d;
   const volIdx = o.supply_volatility_index;
   const pressureClass = o.unlock_pressure_classification;
@@ -460,7 +481,10 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
     validVolume24hUsd &&
     validLiquidityUsd &&
     validUnlockMarketCapImpact &&
-    validUnlockAmountUsd
+    validUnlockAmountUsd &&
+    validAnalysisTimestamp &&
+    validEngineVersion &&
+    validDataFreshnessSeconds
   );
 }
 
