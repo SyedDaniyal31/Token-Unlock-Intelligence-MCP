@@ -256,6 +256,28 @@ function parseArguments(args: unknown): Record<string, unknown> {
   return {};
 }
 
+/** Defensive normalizer: never return [] to Context; empty/null → soft failure, array of one → unwrap, object → pass through. */
+function normalizeSupplyRiskResult(
+  maybeResult: unknown,
+  id: string | number | null
+): JsonRpcSuccess {
+  if (
+    maybeResult == null ||
+    (Array.isArray(maybeResult) && maybeResult.length === 0)
+  ) {
+    const softFailure = buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
+    return jsonRpcSuccess(id, softFailure);
+  }
+  if (Array.isArray(maybeResult) && maybeResult.length === 1) {
+    return jsonRpcSuccess(id, maybeResult[0]);
+  }
+  if (typeof maybeResult === "object" && !Array.isArray(maybeResult)) {
+    return jsonRpcSuccess(id, maybeResult);
+  }
+  const softFailure = buildSoftFailureSupplyRisk("UNEXPECTED_RESULT_SHAPE", 0);
+  return jsonRpcSuccess(id, softFailure);
+}
+
 const TOOL_TIMEOUT_MS = 35_000;
 
 export interface UnlockResultShape {
@@ -541,7 +563,7 @@ async function handleAnalyzeTokenSupplyRisk(
       if (!isValidSupplyRiskResult(softFailure)) {
         return jsonRpcError(id, -32603, "Internal result validation failed.");
       }
-      return jsonRpcSuccess(id, softFailure);
+      return normalizeSupplyRiskResult(softFailure, id);
     }
     const data = result.data;
     if (!isValidSupplyRiskResult(data)) {
@@ -551,7 +573,7 @@ async function handleAnalyzeTokenSupplyRisk(
       { tool: SUPPLY_RISK_TOOL_NAME, token, liquidity_stress_score: data.liquidity_stress_score },
       "MCP callTool success"
     );
-    return jsonRpcSuccess(id, data);
+    return normalizeSupplyRiskResult(data, id);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, token }, "MCP analyze_token_supply_risk error");
@@ -559,7 +581,7 @@ async function handleAnalyzeTokenSupplyRisk(
     if (!isValidSupplyRiskResult(softFailure)) {
       return jsonRpcError(id, -32603, "Internal result validation failed.");
     }
-    return jsonRpcSuccess(id, softFailure);
+    return normalizeSupplyRiskResult(softFailure, id);
   }
 }
 
@@ -655,29 +677,30 @@ export function registerMcpRoute(
 
       const methodName = typeof method === "string" ? method : "";
 
+      let response: JsonRpcSuccess | JsonRpcErrorBody;
+
       if (methodName === "listTools" || methodName === "tools/list") {
-        safeSend(res, handleListTools(requestId));
-        return;
+        response = handleListTools(requestId);
+      } else if (methodName === "callTool" || methodName === "tools/call") {
+        response = await handleCallTool(requestId, params, deps);
+      } else if (methodName === "analyze_token_supply_risk") {
+        const args = parseArguments(params);
+        const tokenSymbol = args.token_symbol ?? args.tokenSymbol ?? args.token;
+        const token = (typeof tokenSymbol === "string" ? tokenSymbol : tokenSymbol != null ? String(tokenSymbol) : "").trim();
+        response = await handleAnalyzeTokenSupplyRisk(requestId, token, args, deps);
+      } else if (methodName === "initialize") {
+        response = handleInitialize(requestId);
+      } else if (methodName === "") {
+        response = jsonRpcError(requestId, -32600, "Invalid Request: method is required.");
+      } else {
+        logger.warn({ method: methodName }, "MCP method not found");
+        response = jsonRpcError(requestId, -32601, `Method not found: ${methodName}.`);
       }
 
-      if (methodName === "callTool" || methodName === "tools/call") {
-        const result = await handleCallTool(requestId, params, deps);
-        safeSend(res, result);
-        return;
+      if (!response || typeof response !== "object" || !("jsonrpc" in response)) {
+        response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_ROUTER_RESPONSE", 0));
       }
-
-      if (methodName === "initialize") {
-        safeSend(res, handleInitialize(requestId));
-        return;
-      }
-
-      if (methodName === "") {
-        safeSend(res, jsonRpcError(requestId, -32600, "Invalid Request: method is required."));
-        return;
-      }
-
-      logger.warn({ method: methodName }, "MCP method not found");
-      safeSend(res, jsonRpcError(requestId, -32601, `Method not found: ${methodName}.`));
+      safeSend(res, response);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, message }, "MCP POST unhandled error");

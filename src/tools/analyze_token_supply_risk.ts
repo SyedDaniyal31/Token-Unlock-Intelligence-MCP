@@ -185,7 +185,12 @@ export async function runAnalyzeTokenSupplyRisk(
   };
   const cacheKey = canonicalCacheKey(cacheParams);
   const cached = getCachedResult<SupplyRiskOutputFlat>(cacheKey);
-  if (cached) return { success: true, data: cached };
+  if (cached) {
+    if (cached == null || (Array.isArray(cached) && cached.length === 0)) {
+      return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+    }
+    return { success: true, data: cached };
+  }
 
   const executionNowMs = Date.now();
 
@@ -221,6 +226,9 @@ export async function runAnalyzeTokenSupplyRisk(
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       setCachedResult(cacheKey, full);
+      if (full == null || (Array.isArray(full) && full.length === 0)) {
+        return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+      }
       return { success: true, data: full };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -320,6 +328,9 @@ export async function runAnalyzeTokenSupplyRisk(
   });
   flat.result_integrity_hash = computeResultIntegrityHash(flat as unknown as Record<string, unknown>) || "";
   setCachedResult(cacheKey, flat);
+  if (flat == null || (Array.isArray(flat) && flat.length === 0)) {
+    return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+  }
   return { success: true, data: flat };
 }
 
