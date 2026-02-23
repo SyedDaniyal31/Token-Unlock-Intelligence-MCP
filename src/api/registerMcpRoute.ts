@@ -304,14 +304,41 @@ function normalizeSupplyRiskResult(
     const softFailure = buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
     return jsonRpcSuccess(id, softFailure);
   }
-  if (Array.isArray(maybeResult) && maybeResult.length === 1) {
-    return jsonRpcSuccess(id, maybeResult[0]);
+  if (Array.isArray(maybeResult) && maybeResult.length >= 1) {
+    const first = maybeResult[0];
+    if (first != null && typeof first === "object" && !Array.isArray(first) && "data" in first) {
+      return jsonRpcSuccess(id, (first as { data: unknown }).data ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0));
+    }
+    return jsonRpcSuccess(id, first ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0));
   }
   if (typeof maybeResult === "object" && !Array.isArray(maybeResult)) {
     return jsonRpcSuccess(id, maybeResult);
   }
   const softFailure = buildSoftFailureSupplyRisk("UNEXPECTED_RESULT_SHAPE", 0);
   return jsonRpcSuccess(id, softFailure);
+}
+
+/**
+ * Ensure JSON-RPC result is always a flat object for Context (never [], never { success, data }).
+ * Call before safeSend so Context receives result: { flat object }.
+ */
+function ensureFlatResultPayload(
+  response: JsonRpcSuccess | JsonRpcErrorBody,
+  requestId: string | number | null
+): JsonRpcSuccess | JsonRpcErrorBody {
+  if (!("result" in response)) return response;
+  let r = (response as JsonRpcSuccess).result;
+  if (Array.isArray(r)) {
+    r = r.length > 0 ? r[0] : null;
+    (response as JsonRpcSuccess).result = r ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0);
+  }
+  if (r != null && typeof r === "object" && !Array.isArray(r) && "success" in r && "data" in r) {
+    const inner = (r as { success: unknown; data: unknown }).data;
+    (response as JsonRpcSuccess).result = inner != null && typeof inner === "object" && !Array.isArray(inner)
+      ? inner
+      : buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
+  }
+  return response;
 }
 
 const TOOL_TIMEOUT_MS = 35_000;
@@ -799,6 +826,18 @@ export function registerMcpRoute(
       }
       if ("result" in response && Array.isArray((response as JsonRpcSuccess).result)) {
         response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("EMPTY_RESULT", 0));
+      }
+      response = ensureFlatResultPayload(response, requestId);
+      if ("result" in response) {
+        const result = (response as JsonRpcSuccess).result;
+        logger.info(
+          {
+            finalPayloadType: typeof result,
+            isArray: Array.isArray(result),
+            keys: result != null && typeof result === "object" && !Array.isArray(result) ? Object.keys(result).slice(0, 20) : null,
+          },
+          "MCP final payload shape"
+        );
       }
       safeSend(res, response);
     } catch (err) {
