@@ -34,6 +34,9 @@ const deps = {
 };
 
 const app = express();
+// Railway runs behind a single reverse proxy.
+// Required for express-rate-limit to correctly read X-Forwarded-For.
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(requestIdMiddleware);

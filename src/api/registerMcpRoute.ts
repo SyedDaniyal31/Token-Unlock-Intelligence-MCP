@@ -693,6 +693,11 @@ export function registerMcpRoute(
       } else if (methodName === "") {
         response = jsonRpcError(requestId, -32600, "Invalid Request: method is required.");
       } else {
+        // Context lifecycle notifications (safe to ignore)
+        if (typeof method === "string" && method.startsWith("notifications/")) {
+          safeSend(res, { jsonrpc: "2.0", id: null, result: null });
+          return;
+        }
         logger.warn({ method: methodName }, "MCP method not found");
         response = jsonRpcError(requestId, -32601, `Method not found: ${methodName}.`);
       }
