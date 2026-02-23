@@ -1,10 +1,9 @@
-logger.error("🚨 NEW MCP ROUTER VERSION ACTIVE 🚨");
 /**
  * Production MCP JSON-RPC handler for POST /mcp.
  * Context Protocol compliant: listTools, callTool (tools/list, tools/call).
  * Returns -32603 when result validation fails (internal error); uses -32000 for
  * unresolvable/operational failures (e.g. timeout, token not supported).
- */
+ */ 
 
 import type { Request, Response } from "express";
 import type { RequestHandler } from "express";
@@ -864,3 +863,4 @@ export function registerMcpRoute(
   };
   app.post("/mcp", ...middleware, handler);
 }
+
