@@ -512,6 +512,19 @@ function toUnlockResult(report: {
   };
 }
 
+/** Map supply risk flat to unlock report shape for dynamic-path fallback. */
+function supplyRiskToUnlockReport(data: SupplyRiskOutputFlat): {
+  unlock_vs_volume_ratio: number;
+  unlock_percent_supply: number;
+  score_numeric: number;
+} {
+  return {
+    unlock_vs_volume_ratio: typeof data.unlock_pressure_ratio === "number" ? data.unlock_pressure_ratio : 0,
+    unlock_percent_supply: typeof data.inflation_rate_30d === "number" ? data.inflation_rate_30d : 0,
+    score_numeric: typeof data.liquidity_stress_score === "number" ? data.liquidity_stress_score : 0,
+  };
+}
+
 async function handleAnalyzeTokenUnlock(
   id: string | number | null,
   symbol: string,
@@ -519,35 +532,69 @@ async function handleAnalyzeTokenUnlock(
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
   const registry = createUnlockTokenRegistry();
   const resolved = await resolveTokenBySymbol(symbol, registry);
-  if (!resolved) {
-    return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
-  }
-  const schedule = await getScheduleByTokenCaseInsensitive(resolved.symbol, resolved.chain);
-  if (!schedule) {
-    return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
-  }
-  try {
-    const report = await Promise.race([
-      getIntelligenceReport(resolved.symbol, deps),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-      ),
-    ]);
-    const result = toUnlockResult(report);
-    if (!isValidUnlockResult(result)) {
-      return jsonRpcError(id, -32603, "Internal result validation failed.");
+  const schedule = resolved
+    ? await getScheduleByTokenCaseInsensitive(resolved.symbol, resolved.chain)
+    : null;
+
+  if (resolved && schedule) {
+    try {
+      const report = await Promise.race([
+        getIntelligenceReport(resolved.symbol, deps),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+        ),
+      ]);
+      const result = toUnlockResult(report);
+      if (!isValidUnlockResult(result)) {
+        return jsonRpcError(id, -32603, "Internal result validation failed.");
+      }
+      logger.info({ tool: UNLOCK_TOOL_NAME, token_symbol: symbol, risk_score: result.risk_score }, "MCP callTool success");
+      return jsonRpcSuccess(id, result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ err, message, token_symbol: symbol }, "MCP analyze_token_unlock error");
+      return jsonRpcError(
+        id,
+        -32000,
+        message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
+      );
     }
-    logger.info({ tool: UNLOCK_TOOL_NAME, token_symbol: symbol, risk_score: result.risk_score }, "MCP callTool success");
-    return jsonRpcSuccess(id, result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message, token_symbol: symbol }, "MCP analyze_token_unlock error");
-    return jsonRpcError(
-      id,
-      -32000,
-      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
-    );
   }
+
+  const symbolToResolve = resolved?.symbol ?? symbol;
+  try {
+    const cgData = await fetchCoinGeckoData(symbolToResolve);
+    if (cgData?.address && cgData?.platform_chain) {
+      const chain = cgData.platform_chain;
+      if (chain === "ethereum" || chain === "arbitrum" || chain === "bsc") {
+        const supplyResult = await Promise.race([
+          runAnalyzeTokenSupplyRisk(
+            { token_symbol: symbolToResolve, token_address: cgData.address, chain },
+            deps
+          ),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+          ),
+        ]);
+        if (supplyResult.success && supplyResult.data) {
+          const report = supplyRiskToUnlockReport(supplyResult.data);
+          const result = toUnlockResult(report);
+          if (!isValidUnlockResult(result)) {
+            return jsonRpcError(id, -32603, "Internal result validation failed.");
+          }
+          logger.info(
+            { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "dynamic" },
+            "MCP callTool success (dynamic fallback)"
+          );
+          return jsonRpcSuccess(id, result);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: CoinGecko/dynamic fallback failed");
+  }
+
+  return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
 }
 
 async function handleAnalyzeTokenSupplyRisk(
