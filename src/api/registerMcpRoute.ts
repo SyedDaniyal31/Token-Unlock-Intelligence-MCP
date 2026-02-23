@@ -1,3 +1,4 @@
+logger.error("🚨 NEW MCP ROUTER VERSION ACTIVE 🚨");
 /**
  * Production MCP JSON-RPC handler for POST /mcp.
  * Context Protocol compliant: listTools, callTool (tools/list, tools/call).
@@ -659,7 +660,7 @@ async function handleAnalyzeTokenSupplyRisk(
   }
 
   try {
-    const result = await Promise.race([
+    let result = await Promise.race([
       runAnalyzeTokenSupplyRisk(
         {
           token_symbol: token,
@@ -674,6 +675,17 @@ async function handleAnalyzeTokenSupplyRisk(
         setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
       ),
     ]);
+    if (result == null || typeof result !== "object" || !("success" in result)) {
+      const softFailure = buildSoftFailureSupplyRisk("INVALID_INTERNAL_RETURN", 0);
+      return normalizeSupplyRiskResult(softFailure, id);
+    }
+    if (result.success && (result.data == null || Array.isArray(result.data))) {
+      const softFailure = buildSoftFailureSupplyRisk(
+        Array.isArray(result.data) && result.data.length === 0 ? "EMPTY_ARRAY_GUARD" : "NO_DATA_RETURNED",
+        0
+      );
+      return normalizeSupplyRiskResult(softFailure, id);
+    }
     if (!result.success) {
       const softFailure = buildSoftFailureSupplyRisk(
         result.error,
