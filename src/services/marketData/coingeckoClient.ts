@@ -172,6 +172,17 @@ function firstPlatformAddress(platforms: unknown): string | null {
   return null;
 }
 
+/** First platform key and address; used to infer chain when key is not in COINGECKO_CHAIN_KEYS. */
+function firstPlatformKeyAndAddress(platforms: unknown): { key: string; address: string } | null {
+  if (platforms == null || typeof platforms !== "object") return null;
+  const obj = platforms as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (typeof v === "string" && v.trim() !== "") return { key, address: (v as string).trim() };
+  }
+  return null;
+}
+
 /** First supported chain (ethereum → bsc → arbitrum) with a contract address; for symbol-only resolution. */
 function firstSupportedChainAndAddress(platforms: unknown): { chain: CoinGeckoSupportedChain; address: string } | null {
   if (platforms == null || typeof platforms !== "object") return null;
@@ -217,8 +228,13 @@ export async function fetchCoinGeckoData(symbol: string): Promise<CoinGeckoMarke
     : null;
 
   const chainAndAddr = firstSupportedChainAndAddress(raw.platforms);
-  const address = chainAndAddr ? chainAndAddr.address : firstPlatformAddress(raw.platforms);
-  const platform_chain = chainAndAddr ? chainAndAddr.chain : null;
+  const firstPlatform = firstPlatformKeyAndAddress(raw.platforms);
+  const address = chainAndAddr ? chainAndAddr.address : (firstPlatform ? firstPlatform.address : null);
+  let platform_chain: CoinGeckoSupportedChain | null = chainAndAddr ? chainAndAddr.chain : null;
+  if (address && !platform_chain && firstPlatform) {
+    const slug = normalizeCoinGeckoChainToSlug(firstPlatform.key);
+    if (slug) platform_chain = slug;
+  }
 
   return {
     address,

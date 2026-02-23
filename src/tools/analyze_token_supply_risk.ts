@@ -348,6 +348,18 @@ export async function runAnalyzeTokenSupplyRisk(
         );
         return { success: true, data: noData };
       }
+      // Case 1: engine returned defaultOutput (no supply/unlock/liquidity data) — return structured NO_DATA
+      if (Array.isArray(full.risk_flags) && full.risk_flags.includes("NO_DATA")) {
+        const noData = buildStructuredNoDataSupplyRisk(
+          symbol || tokenAddress || "unknown",
+          "dynamic",
+          "DYNAMIC_ENGINE_NO_DATA",
+          engine_latency_ms,
+          analysisTimestamp,
+          0
+        );
+        return { success: true, data: noData };
+      }
       return { success: true, data: full };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

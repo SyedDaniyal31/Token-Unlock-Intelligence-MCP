@@ -292,7 +292,7 @@ function parseArguments(args: unknown): Record<string, unknown> {
   return {};
 }
 
-/** Defensive normalizer: never return [] to Context; empty/null → soft failure, array of one → unwrap, object → pass through. */
+/** Defensive normalizer: never return [] to Context; empty/null → soft failure, array → unwrap to flat object only. */
 function normalizeSupplyRiskResult(
   maybeResult: unknown,
   id: string | number | null
@@ -306,10 +306,14 @@ function normalizeSupplyRiskResult(
   }
   if (Array.isArray(maybeResult) && maybeResult.length >= 1) {
     const first = maybeResult[0];
-    if (first != null && typeof first === "object" && !Array.isArray(first) && "data" in first) {
-      return jsonRpcSuccess(id, (first as { data: unknown }).data ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0));
+    let flat: unknown =
+      first != null && typeof first === "object" && !Array.isArray(first) && "data" in first
+        ? (first as { data: unknown }).data
+        : first;
+    if (flat == null || Array.isArray(flat) || typeof flat !== "object") {
+      flat = buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0);
     }
-    return jsonRpcSuccess(id, first ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0));
+    return jsonRpcSuccess(id, flat);
   }
   if (typeof maybeResult === "object" && !Array.isArray(maybeResult)) {
     return jsonRpcSuccess(id, maybeResult);
@@ -319,7 +323,7 @@ function normalizeSupplyRiskResult(
 }
 
 /**
- * Ensure JSON-RPC result is always a flat object for Context (never [], never { success, data }).
+ * Ensure JSON-RPC result is always a flat object for Context (never [], null, or { success, data }).
  * Call before safeSend so Context receives result: { flat object }.
  */
 function ensureFlatResultPayload(
@@ -330,13 +334,17 @@ function ensureFlatResultPayload(
   let r = (response as JsonRpcSuccess).result;
   if (Array.isArray(r)) {
     r = r.length > 0 ? r[0] : null;
-    (response as JsonRpcSuccess).result = r ?? buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0);
   }
-  if (r != null && typeof r === "object" && !Array.isArray(r) && "success" in r && "data" in r) {
+  if (r == null || Array.isArray(r) || typeof r !== "object") {
+    (response as JsonRpcSuccess).result = buildSoftFailureSupplyRisk("EMPTY_ARRAY_GUARD", 0);
+    return response;
+  }
+  if (typeof r === "object" && !Array.isArray(r) && "success" in r && "data" in r) {
     const inner = (r as { success: unknown; data: unknown }).data;
-    (response as JsonRpcSuccess).result = inner != null && typeof inner === "object" && !Array.isArray(inner)
-      ? inner
-      : buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
+    (response as JsonRpcSuccess).result =
+      inner != null && typeof inner === "object" && !Array.isArray(inner)
+        ? inner
+        : buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
   }
   return response;
 }
@@ -589,8 +597,9 @@ async function handleAnalyzeTokenUnlock(
   }
 
   const symbolToResolve = resolved?.symbol ?? symbol;
+  let cgData: Awaited<ReturnType<typeof fetchCoinGeckoData>> = null;
   try {
-    const cgData = await fetchCoinGeckoData(symbolToResolve);
+    cgData = await fetchCoinGeckoData(symbolToResolve);
     if (cgData?.address && cgData?.platform_chain) {
       const chainSlug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
       if (chainSlug) {
@@ -621,6 +630,15 @@ async function handleAnalyzeTokenUnlock(
     logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: CoinGecko/dynamic fallback failed");
   }
 
+  logger.error(
+    {
+      symbol: symbolToResolve,
+      hasCgData: !!cgData,
+      hasAddress: !!cgData?.address,
+      platform_chain: cgData?.platform_chain ?? null,
+    },
+    "UNLOCK_TOKEN_NOT_SUPPORTED"
+  );
   return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
 }
 
@@ -676,7 +694,7 @@ async function handleAnalyzeTokenSupplyRisk(
         setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
       ),
     ]);
-    if (result == null || typeof result !== "object" || !("success" in result)) {
+    if (result == null || typeof result !== "object" || Array.isArray(result) || !("success" in result)) {
       const softFailure = buildSoftFailureSupplyRisk("INVALID_INTERNAL_RETURN", 0);
       return normalizeSupplyRiskResult(softFailure, id);
     }
@@ -848,21 +866,27 @@ export function registerMcpRoute(
       if (!response || typeof response !== "object" || !("jsonrpc" in response)) {
         response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_ROUTER_RESPONSE", 0));
       }
-      if ("result" in response && Array.isArray((response as JsonRpcSuccess).result)) {
-        response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("EMPTY_RESULT", 0));
+      if ("result" in response) {
+        const r = (response as JsonRpcSuccess).result;
+        if (r == null || Array.isArray(r) || typeof r !== "object") {
+          response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_RESULT_SHAPE", 0));
+        } else if ("success" in r && "data" in r) {
+          const inner = (r as { success: unknown; data: unknown }).data;
+          response = jsonRpcSuccess(
+            requestId,
+            inner != null && typeof inner === "object" && !Array.isArray(inner)
+              ? inner
+              : buildSoftFailureSupplyRisk("EMPTY_DATA_GUARD", 0)
+          );
+        }
       }
       response = ensureFlatResultPayload(response, requestId);
       if ("result" in response) {
-        const result = (response as JsonRpcSuccess).result;
-        logger.info(
-          {
-            finalPayloadType: typeof result,
-            isArray: Array.isArray(result),
-            keys: result != null && typeof result === "object" && !Array.isArray(result) ? Object.keys(result).slice(0, 20) : null,
-          },
-          "MCP final payload shape"
-        );
+        if (Array.isArray((response as JsonRpcSuccess).result) || (response as JsonRpcSuccess).result == null) {
+          response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
+        }
       }
+      logger.error({ response }, "FINAL_JSON_RPC_RESPONSE_SENT");
       safeSend(res, response);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

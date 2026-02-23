@@ -497,7 +497,7 @@ export function defaultOutput(
     emission_acceleration_score: 0,
     simulation_outcome: null,
     risk_flags: ["NO_DATA"],
-    risk_tier: "LOW",
+    risk_tier: "NO_DATA",
     data_quality_score: 0,
   };
 }
