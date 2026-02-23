@@ -99,13 +99,17 @@ export async function listUnlockSchedules(): Promise<TokenMetadata[]> {
  * Used for multi-chain report breakdown and combined_score aggregation. Defaults omitted chain_id to ethereum in DB.
  */
 export async function getChainIdsForToken(tokenSymbol: string): Promise<string[]> {
-  const result = await query<{ chain_id: string | null }>(
-    `(SELECT DISTINCT COALESCE(chain_id, 'ethereum') AS chain_id FROM unlock_events WHERE token_symbol = $1)
+  const sql = `(SELECT DISTINCT COALESCE(chain_id, 'ethereum') AS chain_id FROM unlock_events WHERE token_symbol = $1)
      UNION
      (SELECT DISTINCT COALESCE(chain_id, 'ethereum') AS chain_id FROM unlock_schedules WHERE token_symbol = $1)
-     ORDER BY chain_id`,
-    [tokenSymbol, tokenSymbol]
-  );
+     ORDER BY chain_id`;
+  const params = [tokenSymbol];
+  const placeholders = sql.match(/\$\d+/g) || [];
+  const uniqueCount = new Set(placeholders).size;
+  if (params.length !== uniqueCount) {
+    throw new Error(`SQL_PARAM_MISMATCH: ${uniqueCount} placeholders, ${params.length} params`);
+  }
+  const result = await query<{ chain_id: string | null }>(sql, params);
   const ids = result.rows.map((r) => r.chain_id ?? "ethereum").filter(Boolean);
   return ids.length > 0 ? ids : ["ethereum"];
 }
