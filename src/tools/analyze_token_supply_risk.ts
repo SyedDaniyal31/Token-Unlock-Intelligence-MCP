@@ -335,9 +335,15 @@ export async function runAnalyzeTokenSupplyRisk(
   const resolved = await resolveTokenBySymbol(str(input.token_symbol), registry);
   if (!resolved) {
     return {
-      success: false,
-      error: "Token not supported on ethereum, bsc, or arbitrum",
-      engine_latency_ms: 0,
+      success: true,
+      data: buildStructuredNoDataSupplyRisk(
+        symbol || str(input.token_symbol) || "unknown",
+        "registry",
+        "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET",
+        0,
+        analysisTimestamp,
+        0
+      ),
     };
   }
 
@@ -345,7 +351,17 @@ export async function runAnalyzeTokenSupplyRisk(
   const dbChainId = resolved.chain;
   const schedule = await getScheduleByTokenCaseInsensitive(canonicalSymbol, dbChainId);
   if (!schedule) {
-    return { success: false, error: "Token not supported on ethereum, bsc, or arbitrum", engine_latency_ms: 0 };
+    return {
+      success: true,
+      data: buildStructuredNoDataSupplyRisk(
+        canonicalSymbol,
+        "registry",
+        "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET",
+        0,
+        analysisTimestamp,
+        0
+      ),
+    };
   }
 
   symbol = canonicalSymbol;
