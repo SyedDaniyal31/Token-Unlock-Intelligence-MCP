@@ -3,10 +3,9 @@
  * Includes quantitative analytics: uncertainty, volume fusion, concentration, depth, emission momentum, optional shock simulation.
  */
 
-import { getChainProvider } from "../../infrastructure/rpc/chainProviderFactory.js";
-import { readErc20Supply } from "./erc20ChainReader.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
+import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment } from "../marketData/marketEnrichment.js";
 import {
   buildForwardRiskWithUncertainty,
@@ -120,8 +119,6 @@ export async function runDynamicSupplyEngine(
     : Date.now();
   const deadline = Date.now() + REQUEST_TIMEOUT_MS;
   const chainKey = input.chain;
-  const provider = getChainProvider(chainKey);
-
   const addr = input.token_address.startsWith("0x")
     ? input.token_address
     : "0x" + input.token_address;
@@ -129,32 +126,36 @@ export async function runDynamicSupplyEngine(
   let totalSupply = toNum(input.totalSupply);
   let decimals = 18;
   let supplySnapshotTs = Math.floor(executionNowMs / 1000);
-
-  const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
-  if (cachedEntry && cachedEntry.data.totalSupply >= 0) {
-    totalSupply = totalSupply || cachedEntry.data.totalSupply;
-    decimals = cachedEntry.data.decimals;
-    supplySnapshotTs = cachedEntry.timestamp;
-  } else {
-    const snapshot = await readErc20Supply(provider, addr);
-    totalSupply = totalSupply || snapshot.totalSupply;
-    decimals = snapshot.decimals;
-    setSupplyInCache(addr, chainKey, snapshot);
-  }
-
   let blockNumberUsed = 0;
   let blockTimestampUsed = 0;
-  if (provider.getLatestBlockNumber && Date.now() < deadline) {
-    try {
-      blockNumberUsed = await provider.getLatestBlockNumber();
-      if (blockNumberUsed > 0 && provider.getBlock) {
-        const block = await provider.getBlock(blockNumberUsed);
-        if (block?.timestamp != null) blockTimestampUsed = block.timestamp;
-      }
-    } catch {
-      blockNumberUsed = 0;
-      blockTimestampUsed = 0;
+
+  try {
+    if (getRpcUrl(chainKey) == null) {
+      throw new Error("RPC_FAILURE");
     }
+
+    const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
+    if (cachedEntry && cachedEntry.data.totalSupply >= 0) {
+      totalSupply = totalSupply || cachedEntry.data.totalSupply;
+      decimals = cachedEntry.data.decimals;
+      supplySnapshotTs = cachedEntry.timestamp;
+    } else {
+      const snapshot = await readErc20SupplyFromRpc(chainKey, addr);
+      totalSupply = totalSupply || snapshot.totalSupply;
+      decimals = snapshot.decimals;
+      setSupplyInCache(addr, chainKey, snapshot);
+    }
+
+    if (Date.now() < deadline) {
+      blockNumberUsed = await getCurrentBlock(chainKey);
+      if (blockNumberUsed > 0) {
+        blockTimestampUsed = await getBlockTimestamp(chainKey, blockNumberUsed);
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "RPC_FAILURE") throw err;
+    return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, 0, 0, Math.floor(executionNowMs / 1000));
   }
 
   if (Date.now() >= deadline) {

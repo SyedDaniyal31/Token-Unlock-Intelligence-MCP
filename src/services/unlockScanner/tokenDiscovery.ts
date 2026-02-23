@@ -3,9 +3,7 @@
  * Uses chainClient for logs; RPC eth_call for supply/decimals when available.
  */
 
-import { getChainProvider } from "../../infrastructure/rpc/chainProviderFactory.js";
-import { readErc20Supply } from "../dynamicSupply/erc20ChainReader.js";
-import { getCurrentBlock, getLogs, type UnlockScannerChain } from "./chainClient.js";
+import { getCurrentBlock, getLogs, readErc20SupplyFromRpc, type UnlockScannerChain } from "./chainClient.js";
 
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const ZERO_TOPIC = "0x0000000000000000000000000000000000000000000000000000000000000000";
@@ -62,8 +60,7 @@ export async function discoverToken(
   let totalSupply = 0;
   let decimals = 18;
   try {
-    const provider = getChainProvider(chain);
-    const snapshot = await readErc20Supply(provider, addr);
+    const snapshot = await readErc20SupplyFromRpc(chain, addr);
     totalSupply = snapshot.totalSupply >= 0 ? snapshot.totalSupply : 0;
     decimals = snapshot.decimals >= 0 && snapshot.decimals <= 255 ? snapshot.decimals : 18;
   } catch {

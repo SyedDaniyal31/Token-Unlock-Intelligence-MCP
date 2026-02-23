@@ -7,8 +7,7 @@ import type { Server as HttpServer } from "http";
 import { config } from "./core/config.js";
 import logger from "./core/logger.js";
 import { closePool } from "./infrastructure/database/postgres.js";
-import { MockEthereumProvider } from "./infrastructure/rpc/ethereumProvider.js";
-import { EthereumRpcProvider } from "./infrastructure/rpc/ethereumRpcProvider.js";
+import { getChainProvider } from "./infrastructure/rpc/chainProviderFactory.js";
 import { StubMarketProvider, CoinGeckoMarketProvider } from "./infrastructure/market/marketProvider.js";
 import { CachingMarketProvider } from "./infrastructure/market/marketCache.js";
 import { DefaultExchangeRegistry } from "./infrastructure/exchanges/exchangeRegistry.js";
@@ -21,18 +20,7 @@ import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
 import { runUnlockPrecompute } from "./broker.js";
 
-const rpcUrl = (config.RPC_URL || process.env.RPC_URL || "").trim();
-const chainProvider =
-  rpcUrl
-    ? (() => {
-        try {
-          return new EthereumRpcProvider(rpcUrl);
-        } catch (err) {
-          logger.warn({ err: err instanceof Error ? err.message : String(err) }, "EthereumRpcProvider init failed; using mock");
-          return new MockEthereumProvider();
-        }
-      })()
-    : new MockEthereumProvider();
+const chainProvider = getChainProvider("ethereum");
 const baseMarketProvider = config.COINGECKO_API_KEY
   ? new CoinGeckoMarketProvider(config.COINGECKO_API_KEY)
   : new StubMarketProvider();

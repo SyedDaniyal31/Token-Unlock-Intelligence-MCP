@@ -176,11 +176,11 @@ export class EthereumRpcProvider implements ChainProvider {
    * Latest block number via eth_blockNumber. For chain freshness metadata.
    */
   async getLatestBlockNumber(): Promise<number> {
-    const hex = await this.rpc<string>("eth_blockNumber", []);
+    const hex = await this.doRpcRequest<string>("eth_blockNumber", []);
     return parseBlockNumber(typeof hex === "string" ? hex : "0x0");
   }
 
-  private async rpc<T>(method: string, params: unknown[], requestId?: string): Promise<T> {
+  private async doRpcRequest<T>(method: string, params: unknown[], requestId?: string): Promise<T> {
     const id = requestId ?? shortRequestId();
     const start = Date.now();
     let lastErr: Error | null = null;
@@ -282,7 +282,7 @@ export class EthereumRpcProvider implements ChainProvider {
         let batchOk = true;
         for (const { from: f, to: t } of subRanges) {
           try {
-            const raw = await this.rpc<EthLogRaw[] | null>(
+            const raw = await this.doRpcRequest<EthLogRaw[] | null>(
               "eth_getLogs",
               [
                 {
@@ -369,7 +369,7 @@ export class EthereumRpcProvider implements ChainProvider {
     const requestId = shortRequestId();
     const start = Date.now();
     try {
-      const result = await this.rpc<string>("eth_call", [
+      const result = await this.doRpcRequest<string>("eth_call", [
         { to: to.toLowerCase(), data: data.startsWith("0x") ? data : "0x" + data },
         "latest",
       ], requestId);
@@ -385,7 +385,7 @@ export class EthereumRpcProvider implements ChainProvider {
     const requestId = shortRequestId();
     const start = Date.now();
     try {
-      const raw = await this.rpc<{ number: string; timestamp: string } | null>(
+      const raw = await this.doRpcRequest<{ number: string; timestamp: string } | null>(
         "eth_getBlockByNumber",
         [toHex(blockNumber), false],
         requestId

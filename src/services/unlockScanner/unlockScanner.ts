@@ -3,7 +3,7 @@
  * Free executionNowMs at start; 90d window; timeout; fail gracefully (return null).
  */
 
-import { getCurrentBlock, getLogs, getBlockTimestamp, type UnlockScannerChain, type NormalizedLog } from "./chainClient.js";
+import { getCurrentBlock, getLogs, getBlockTimestamp, getRpcUrl, type UnlockScannerChain, type NormalizedLog } from "./chainClient.js";
 import { discoverToken } from "./tokenDiscovery.js";
 import { scanMints } from "./mintScanner.js";
 import {
@@ -92,6 +92,7 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
   if (cached) return cached;
 
   if (Date.now() >= deadlineMs) return null;
+  if (!getRpcUrl(chain)) return null;
 
   let discovery;
   try {

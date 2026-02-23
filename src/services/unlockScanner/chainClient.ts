@@ -2,8 +2,10 @@
  * Unified log fetching for ETH, BSC, ARB.
  * Uses Etherscan API V2 unified endpoint or RPC eth_getLogs when available.
  * Timeout-protected; block-range chunking; no full-chain scans.
+ * All RPC via tryRpcCall; no .rpc or getChainProvider in this file.
  */
 
+import type { ChainProvider, RawChainLog, RawChainBlock } from "../../core/types.js";
 
 export type UnlockScannerChain = "ethereum" | "bsc" | "arbitrum";
 
@@ -28,22 +30,32 @@ const CHUNK_SIZE = 5000;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY ?? "";
 const ETHERSCAN_V2_BASE = "https://api.etherscan.io/v2/api";
 
-function getRpcUrl(chain: UnlockScannerChain): string | undefined {
+export function getRpcUrl(chain: UnlockScannerChain): string | null {
   const url =
     chain === "ethereum"
-      ? (process.env.ETH_RPC_URL ?? process.env.RPC_URL ?? "").trim()
+      ? process.env.ETH_RPC_URL ?? process.env.RPC_URL
       : chain === "bsc"
-        ? (process.env.BSC_RPC_URL ?? "").trim()
-        : (process.env.ARB_RPC_URL ?? "").trim();
-  return url !== "" ? url : undefined;
+        ? process.env.BSC_RPC_URL
+        : chain === "arbitrum"
+          ? process.env.ARB_RPC_URL
+          : undefined;
+
+  if (!url || typeof url !== "string" || url.trim() === "") {
+    return null;
+  }
+
+  return url.trim();
 }
 
 async function tryRpcCall<T>(
-  rpcUrl: string | undefined,
+  rpcUrl: string | null,
   body: unknown,
   timeoutMs: number
 ): Promise<T | null> {
-  if (!rpcUrl) return null;
+  if (!rpcUrl) {
+    return null;
+  }
+
   try {
     const response = await withTimeout(
       fetch(rpcUrl, {
@@ -53,13 +65,100 @@ async function tryRpcCall<T>(
       }),
       timeoutMs
     );
-    if (!response.ok) return null;
-    const json = (await response.json()) as { error?: unknown; result?: T | null };
-    if (!json || json.error != null || json.result == null) return null;
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const json = await response.json();
+
+    if (!json || typeof json !== "object" || !("result" in json)) {
+      return null;
+    }
+
     return json.result as T;
   } catch {
     return null;
   }
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * eth_call with zero-address guard. Returns hex result or null. Never throws.
+ */
+export async function ethCall(
+  chain: UnlockScannerChain,
+  to: string,
+  data: string
+): Promise<string | null> {
+  if (
+    !to ||
+    typeof to !== "string" ||
+    to.trim().toLowerCase() === ZERO_ADDRESS
+  ) {
+    return null;
+  }
+
+  const rpcUrl = getRpcUrl(chain);
+  if (!rpcUrl) return null;
+
+  const body = {
+    jsonrpc: "2.0" as const,
+    method: "eth_call" as const,
+    params: [
+      { to: to.trim().toLowerCase(), data: data.startsWith("0x") ? data : "0x" + data },
+      "latest",
+    ],
+    id: 1,
+  };
+
+  const result = await tryRpcCall<string>(rpcUrl, body, REQUEST_TIMEOUT_MS);
+  return typeof result === "string" ? result : null;
+}
+
+const SELECTOR_TOTAL_SUPPLY = "0x18160ddd";
+const SELECTOR_DECIMALS = "0x313ce567";
+
+function hexToBigInt(hex: string): bigint {
+  if (!hex || typeof hex !== "string") return BigInt(0);
+  const s = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (!/^[0-9a-fA-F]+$/.test(s)) return BigInt(0);
+  try {
+    return BigInt("0x" + s);
+  } catch {
+    return BigInt(0);
+  }
+}
+
+/**
+ * Read totalSupply and decimals via tryRpcCall. Returns zeros on failure or zero address.
+ */
+export async function readErc20SupplyFromRpc(
+  chain: UnlockScannerChain,
+  tokenAddress: string
+): Promise<{ totalSupply: number; decimals: number }> {
+  const addr = tokenAddress.startsWith("0x") ? tokenAddress : "0x" + tokenAddress;
+  if (!addr || addr.toLowerCase() === ZERO_ADDRESS) {
+    return { totalSupply: 0, decimals: 0 };
+  }
+
+  const [totalSupplyHex, decimalsHex] = await Promise.all([
+    ethCall(chain, addr, SELECTOR_TOTAL_SUPPLY),
+    ethCall(chain, addr, SELECTOR_DECIMALS),
+  ]);
+
+  const totalSupplyRaw = hexToBigInt(totalSupplyHex ?? "0x");
+  const decimalsRaw = hexToBigInt(decimalsHex ?? "0x");
+  const decimals = Number(decimalsRaw);
+  const decimalsSafe = Number.isFinite(decimals) && decimals >= 0 && decimals <= 255 ? decimals : 0;
+  const divisor = 10 ** decimalsSafe;
+  const totalSupply = divisor > 0 ? Number(totalSupplyRaw) / divisor : 0;
+
+  return {
+    totalSupply: Number.isFinite(totalSupply) && totalSupply >= 0 ? totalSupply : 0,
+    decimals: decimalsSafe,
+  };
 }
 
 function getChainId(chain: string): number {
@@ -326,4 +425,38 @@ export async function getLogs(
   }
 
   return all;
+}
+
+/**
+ * ChainProvider implementation that delegates to getRpcUrl/tryRpcCall (getLogs, getCurrentBlock, getBlockTimestamp, ethCall).
+ * No legacy .rpc; used by chainProviderFactory.getChainProvider.
+ */
+export function createChainProviderAdapter(chain: UnlockScannerChain): ChainProvider {
+  return {
+    async getLogs(contractAddress: string, fromBlock: number, toBlock: number): Promise<RawChainLog[]> {
+      const logs = await getLogs(chain, {
+        address: contractAddress,
+        fromBlock,
+        toBlock,
+      });
+      return logs.map((l) => ({
+        blockNumber: l.blockNumber,
+        transactionHash: "",
+        topics: l.topics,
+        data: l.data,
+        logIndex: undefined,
+      }));
+    },
+    async getBlock(blockNumber: number): Promise<RawChainBlock | null> {
+      const timestamp = await getBlockTimestamp(chain, blockNumber);
+      return { number: blockNumber, timestamp };
+    },
+    async getLatestBlockNumber(): Promise<number> {
+      return getCurrentBlock(chain);
+    },
+    async call(to: string, data: string): Promise<string> {
+      const result = await ethCall(chain, to, data);
+      return result ?? "0x";
+    },
+  };
 }
