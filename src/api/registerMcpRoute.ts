@@ -360,6 +360,16 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
   const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid";
+  const marketCapUsd = o.market_cap_usd;
+  const validMarketCapUsd = marketCapUsd === undefined || (typeof marketCapUsd === "number" && Number.isFinite(marketCapUsd) && marketCapUsd >= 0);
+  const volume24hUsd = o.volume_24h_usd;
+  const validVolume24hUsd = volume24hUsd === undefined || (typeof volume24hUsd === "number" && Number.isFinite(volume24hUsd) && volume24hUsd >= 0);
+  const liquidityUsd = o.liquidity_usd;
+  const validLiquidityUsd = liquidityUsd === undefined || (typeof liquidityUsd === "number" && Number.isFinite(liquidityUsd) && liquidityUsd >= 0);
+  const unlockMarketCapImpact = o.unlock_market_cap_impact;
+  const validUnlockMarketCapImpact = unlockMarketCapImpact === undefined || (typeof unlockMarketCapImpact === "number" && Number.isFinite(unlockMarketCapImpact) && unlockMarketCapImpact >= 0);
+  const unlockAmountUsd = o.unlock_amount_usd;
+  const validUnlockAmountUsd = unlockAmountUsd === undefined || (typeof unlockAmountUsd === "number" && Number.isFinite(unlockAmountUsd) && unlockAmountUsd >= 0);
   const inf90 = o.inflation_rate_90d;
   const volIdx = o.supply_volatility_index;
   const pressureClass = o.unlock_pressure_classification;
@@ -401,7 +411,12 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
     validHolderConf &&
     validCombinedVol &&
     validPatternConf &&
-    validScope
+    validScope &&
+    validMarketCapUsd &&
+    validVolume24hUsd &&
+    validLiquidityUsd &&
+    validUnlockMarketCapImpact &&
+    validUnlockAmountUsd
   );
 }
 

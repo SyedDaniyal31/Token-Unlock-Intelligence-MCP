@@ -51,6 +51,7 @@ export interface MintScannerResult {
 /**
  * Scan Transfer logs (from = zero) in last 90 days. Build mint events with block timestamps.
  * Uses log.timestamp when present (explorer API); otherwise getBlockTimestamp for RPC path.
+ * executionNowMs used for 30d/60d window boundaries (deterministic); omit to fall back to current time.
  * Never throws; returns empty/zero on failure.
  */
 export async function scanMints(
@@ -59,7 +60,8 @@ export async function scanMints(
   decimals: number,
   totalSupply: number,
   getBlockTimestamp: (blockNumber: number) => Promise<number>,
-  deadlineMs: number
+  deadlineMs: number,
+  executionNowMs?: number
 ): Promise<MintScannerResult> {
   const addr = tokenAddress.startsWith("0x") ? tokenAddress : "0x" + tokenAddress;
   const currentBlock = await getCurrentBlock(chain);
@@ -102,7 +104,10 @@ export async function scanMints(
   const rawInflation90d = denominator90d > 0 ? (totalMint90d / denominator90d) * 100 : 0;
   const inflationRate90d = Number.isFinite(rawInflation90d) ? Math.max(0, rawInflation90d) : 0;
 
-  const nowSec = Math.floor(Date.now() / 1000);
+  const nowSec =
+    typeof executionNowMs === "number" && Number.isFinite(executionNowMs)
+      ? Math.floor(executionNowMs / 1000)
+      : Math.floor(Date.now() / 1000);
   const thirtyDaysAgo = nowSec - 30 * 86400;
   const sixtyDaysAgo = nowSec - 60 * 86400;
   const last30d = mintEvents.filter((e) => e.timestamp >= thirtyDaysAgo).reduce((s, e) => s + e.amount, 0);

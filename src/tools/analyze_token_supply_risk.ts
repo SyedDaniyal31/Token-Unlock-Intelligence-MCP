@@ -105,6 +105,12 @@ export interface SupplyRiskOutputFlat {
   combined_volatility_index: number;
   pattern_confidence_score: number;
   analysis_scope: "dynamic" | "registry" | "hybrid";
+  /** Optional enrichment (market_cap_usd, volume_24h_usd, liquidity_usd, unlock_amount_usd, unlock_market_cap_impact). */
+  market_cap_usd?: number;
+  volume_24h_usd?: number;
+  liquidity_usd?: number;
+  unlock_amount_usd?: number;
+  unlock_market_cap_impact?: number;
 }
 
 export interface SupplyRiskOutput {

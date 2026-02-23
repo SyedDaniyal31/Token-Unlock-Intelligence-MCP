@@ -7,6 +7,7 @@ import { getChainProvider } from "../../infrastructure/rpc/chainProviderFactory.
 import { readErc20Supply } from "./erc20ChainReader.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
+import { getMarketEnrichment } from "../marketData/marketEnrichment.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,
@@ -32,6 +33,16 @@ import {
 } from "../../core/quantitativeAnalytics.js";
 
 const REQUEST_TIMEOUT_MS = 8000;
+
+/**
+ * Internal deterministic test harness: same input → same output.
+ * Verification: call twice with identical input (same token, chain, executionNowMs, price, deadline)
+ * and assert deep equality of liquidity_stress_score, risk_flags, risk_tier, unlock_amount_usd,
+ * unlock_market_cap_impact, forward_risk_curve. Do not use Date.now() in test input.
+ */
+async function deterministicTestWrapper(input: DynamicSupplyInput): Promise<DynamicSupplyOutput> {
+  return runDynamicSupplyEngine(input);
+}
 
 export interface DynamicSupplyOutput {
   model_metadata: ReturnType<typeof buildModelMetadata>;
@@ -64,6 +75,12 @@ export interface DynamicSupplyOutput {
   combined_volatility_index: number;
   pattern_confidence_score: number;
   analysis_scope: "dynamic" | "registry" | "hybrid";
+  /** Optional enrichment from CoinGecko + DeFiLlama. */
+  market_cap_usd?: number;
+  volume_24h_usd?: number;
+  liquidity_usd?: number;
+  unlock_amount_usd?: number;
+  unlock_market_cap_impact?: number;
 }
 
 function toNum(x: unknown): number {
@@ -181,7 +198,104 @@ export async function runDynamicSupplyEngine(
   const emissionTrend = 0;
   const cliffPct = 0;
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, inflation30d, cliffPct);
+  let liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
   const nextUnlockTs: number | null = null;
+
+  let enrichment: Awaited<ReturnType<typeof getMarketEnrichment>> = null;
+  if (Date.now() < deadline) {
+    try {
+      enrichment = await getMarketEnrichment(
+        input.symbol ?? "",
+        chainKey,
+        addr ?? null,
+        executionNowMs
+      );
+    } catch {
+      enrichment = null;
+    }
+  }
+
+  const priceForUnlock =
+    enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
+      ? enrichment.priceUsd
+      : toNum(input.price);
+  const supplyForUnlock = Math.max(0, totalSupply);
+  const inflation90dPct = Number.isFinite(inflation90d) && inflation90d >= 0 ? inflation90d : 0;
+  const unlockAmountTokens = supplyForUnlock * (inflation90dPct / 100);
+  const unlockAmountUsd =
+    Number.isFinite(unlockAmountTokens) && Number.isFinite(priceForUnlock) && priceForUnlock >= 0
+      ? Math.max(0, unlockAmountTokens * priceForUnlock)
+      : 0;
+  const unlockMarketCapImpact =
+    enrichment != null && enrichment.marketCapUsd > 0 && Number.isFinite(unlockAmountUsd)
+      ? clamp(unlockAmountUsd / enrichment.marketCapUsd, 0, 1e6)
+      : 0;
+
+  const safeUnlockMarketCapImpact =
+    Number.isFinite(unlockMarketCapImpact) && unlockMarketCapImpact > 0 ? unlockMarketCapImpact : 0;
+  const safeUnlockPressure =
+    Number.isFinite(pressureRatioClean) && pressureRatioClean > 0 ? pressureRatioClean : 0;
+  const safeLiquidityUsd =
+    enrichment != null && Number.isFinite(enrichment.liquidityUsd) && enrichment.liquidityUsd > 0
+      ? enrichment.liquidityUsd
+      : 0;
+  const safeUnlockAmountUsd =
+    Number.isFinite(unlockAmountUsd) && unlockAmountUsd > 0 ? unlockAmountUsd : 0;
+
+  let unlockLiquidityImpact = 0;
+  if (safeLiquidityUsd > 0 && safeUnlockAmountUsd > 0) {
+    unlockLiquidityImpact = safeUnlockAmountUsd / safeLiquidityUsd;
+  }
+  if (!Number.isFinite(unlockLiquidityImpact) || unlockLiquidityImpact < 0) {
+    unlockLiquidityImpact = 0;
+  }
+
+  const normalize = (value: number, scale: number): number => {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    const scaled = value * scale;
+    return Math.max(0, Math.min(100, scaled));
+  };
+
+  const marketCapImpactScore = normalize(safeUnlockMarketCapImpact, 500);
+  const pressureScore = normalize(safeUnlockPressure, 100);
+  const liquidityImpactScore = normalize(unlockLiquidityImpact, 100);
+
+  const components: { value: number; weight: number }[] = [];
+  if (marketCapImpactScore > 0) {
+    components.push({ value: marketCapImpactScore, weight: 0.4 });
+  }
+  if (pressureScore > 0) {
+    components.push({ value: pressureScore, weight: 0.35 });
+  }
+  if (liquidityImpactScore > 0) {
+    components.push({ value: liquidityImpactScore, weight: 0.25 });
+  }
+
+  let fusedLiquidityStress = 0;
+  if (components.length > 0) {
+    const totalWeight = components.reduce((sum, c) => sum + c.weight, 0);
+    fusedLiquidityStress = components.reduce(
+      (sum, c) => sum + c.value * (c.weight / totalWeight),
+      0
+    );
+  }
+  if (!Number.isFinite(fusedLiquidityStress) || fusedLiquidityStress < 0) {
+    fusedLiquidityStress = 0;
+  }
+  fusedLiquidityStress = Math.max(0, Math.min(100, fusedLiquidityStress));
+
+  const baseLiquidityScore = clamp(liquidityScore, 0, 100);
+  let finalLiquidityStress = baseLiquidityScore;
+  if (components.length > 0) {
+    finalLiquidityStress =
+      0.5 * baseLiquidityScore +
+      0.5 * fusedLiquidityStress;
+  }
+  if (!Number.isFinite(finalLiquidityStress) || finalLiquidityStress < 0) {
+    finalLiquidityStress = 0;
+  }
+  finalLiquidityStress = Math.max(0, Math.min(100, finalLiquidityStress));
+  liquidityStressRounded = Math.round(finalLiquidityStress);
 
   const risk30d = clamp(liquidityScore, 0, 100);
   const risk90d = clamp(liquidityScore * 1.1, 0, 100);
@@ -233,7 +347,6 @@ export async function runDynamicSupplyEngine(
   }
 
   const volumeSnapshotTs = Math.floor(executionNowMs / 1000);
-  const liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
   const riskFlags = buildRiskFlags({
     liquidity_stress_score: liquidityStressRounded,
     unlock_pressure_ratio: pressureRatioClean,
@@ -262,7 +375,7 @@ export async function runDynamicSupplyEngine(
   const holderDataConfidenceScore = computeHolderDataConfidenceScore("heuristic");
   const patternConfidenceScore = computePatternConfidenceScore(0);
 
-  return {
+  const out: DynamicSupplyOutput = {
     model_metadata: buildModelMetadata(),
     data_freshness: buildDataFreshness({
       supply_snapshot_timestamp: supplySnapshotTs,
@@ -305,6 +418,16 @@ export async function runDynamicSupplyEngine(
     pattern_confidence_score: Math.min(100, Math.max(0, patternConfidenceScore)),
     analysis_scope: "dynamic",
   };
+
+  if (enrichment != null) {
+    out.market_cap_usd = Number.isFinite(enrichment.marketCapUsd) ? Math.max(0, enrichment.marketCapUsd) : undefined;
+    out.volume_24h_usd = Number.isFinite(enrichment.volume24hUsd) ? Math.max(0, enrichment.volume24hUsd) : undefined;
+    out.liquidity_usd = Number.isFinite(enrichment.liquidityUsd) ? Math.max(0, enrichment.liquidityUsd) : undefined;
+    out.unlock_amount_usd = Number.isFinite(unlockAmountUsd) ? Math.max(0, unlockAmountUsd) : undefined;
+    out.unlock_market_cap_impact = Number.isFinite(unlockMarketCapImpact) ? Math.max(0, unlockMarketCapImpact) : undefined;
+  }
+
+  return out;
 }
 
 function computeLiquidityStressScore(
@@ -372,7 +495,7 @@ export function defaultOutput(
     liquidity_depth_profile: { impact_1pct: 0, impact_3pct: 0, impact_5pct: 0 },
     emission_acceleration_score: 0,
     simulation_outcome: null,
-    risk_flags: [],
+    risk_flags: ["NO_DATA"],
     risk_tier: "LOW",
     data_quality_score: 0,
   };

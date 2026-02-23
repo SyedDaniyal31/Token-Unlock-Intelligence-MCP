@@ -110,7 +110,8 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
       discovery.decimals,
       discovery.totalSupply,
       getBlockTs,
-      deadlineMs
+      deadlineMs,
+      executionNowMs
     );
   } catch {
     mintResult = {
