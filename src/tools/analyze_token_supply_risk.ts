@@ -51,6 +51,7 @@ import {
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
 import { fetchCoinGeckoData } from "../services/marketData/coingeckoClient.js";
+import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_TIMEFRAME_DAYS = 30;
@@ -293,6 +294,7 @@ export async function runAnalyzeTokenSupplyRisk(
   }
 
   if (tokenAddress && chainSlug) {
+    logger.error({ token: symbol || tokenAddress, chain: chainSlug }, "DYNAMIC_PATH_EXECUTED");
     const engineStart = Date.now();
     try {
       let volume30dUsd = 0;
