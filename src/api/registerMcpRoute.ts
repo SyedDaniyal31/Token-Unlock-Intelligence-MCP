@@ -174,6 +174,27 @@ const MCP_TOOLS = [
         combined_volatility_index: { type: "number" as const },
         pattern_confidence_score: { type: "number" as const },
         analysis_scope: { type: "string" as const, enum: ["dynamic", "registry", "hybrid"] as const },
+        search_exhausted: {
+          type: "boolean" as const,
+          description: "True when all data sources were checked but no records were found.",
+        },
+        records_found: {
+          type: "number" as const,
+          description: "Number of unlock or risk records discovered.",
+        },
+        no_results_reason: {
+          type: "string" as const,
+          description: "Machine-readable reason explaining why no data was found.",
+        },
+        coverage: {
+          type: "object" as const,
+          properties: {
+            registry_checked: { type: "boolean" as const },
+            dynamic_checked: { type: "boolean" as const },
+            records_found: { type: "number" as const },
+          },
+          required: ["registry_checked", "dynamic_checked", "records_found"] as const,
+        },
       },
       required: [
         "model_metadata",

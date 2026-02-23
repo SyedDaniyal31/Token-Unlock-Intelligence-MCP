@@ -111,6 +111,11 @@ export interface SupplyRiskOutputFlat {
   liquidity_usd?: number;
   unlock_amount_usd?: number;
   unlock_market_cap_impact?: number;
+  /** Explicit no-data signaling for Context compatibility. Always set when risk_tier === "NO_DATA". */
+  search_exhausted?: boolean;
+  records_found?: number;
+  no_results_reason?: string;
+  coverage?: { registry_checked: boolean; dynamic_checked: boolean; records_found: number };
 }
 
 export interface SupplyRiskOutput {
@@ -159,6 +164,43 @@ export function buildSoftFailureSupplyRisk(
   return full;
 }
 
+/**
+ * Structured no-data response for Context compatibility. Use when zero data is legitimate
+ * (registry/dynamic checked, no unlock events or market data). Never return [] or {}.
+ */
+export function buildStructuredNoDataSupplyRisk(
+  token_symbol: string,
+  analysisScope: "dynamic" | "registry",
+  no_results_reason: string,
+  engine_latency_ms = 0
+): SupplyRiskOutputFlat {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
+  const full: SupplyRiskOutputFlat = {
+    ...base,
+    engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
+    result_integrity_hash: "",
+    historical_depth_limited: true,
+    risk_flags: ["NO_DATA"],
+    risk_tier: "NO_DATA",
+    data_quality_score: 0,
+    holder_data_confidence_score: 0,
+    combined_volatility_index: 0,
+    pattern_confidence_score: 0,
+    analysis_scope: analysisScope,
+    search_exhausted: true,
+    records_found: 0,
+    no_results_reason,
+    coverage: {
+      registry_checked: analysisScope === "registry",
+      dynamic_checked: analysisScope === "dynamic",
+      records_found: 0,
+    },
+  };
+  full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
+  return full;
+}
+
 function num(x: unknown): number {
   if (typeof x === "number" && !Number.isNaN(x)) return x;
   const n = Number(x);
@@ -189,7 +231,14 @@ export async function runAnalyzeTokenSupplyRisk(
   const cached = getCachedResult<SupplyRiskOutputFlat>(cacheKey);
   if (cached) {
     if (cached == null || (Array.isArray(cached) && cached.length === 0)) {
-      return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+      const scope: "dynamic" | "registry" = tokenAddress && chainSlug ? "dynamic" : "registry";
+      const noData = buildStructuredNoDataSupplyRisk(
+        symbol || tokenAddress || str(input.token_symbol) || "unknown",
+        scope,
+        "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+        0
+      );
+      return { success: true, data: noData };
     }
     return { success: true, data: cached };
   }
@@ -229,7 +278,13 @@ export async function runAnalyzeTokenSupplyRisk(
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       setCachedResult(cacheKey, full);
       if (full == null || (Array.isArray(full) && full.length === 0)) {
-        return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+        const noData = buildStructuredNoDataSupplyRisk(
+          symbol || tokenAddress || "unknown",
+          "dynamic",
+          "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+          engine_latency_ms
+        );
+        return { success: true, data: noData };
       }
       return { success: true, data: full };
     } catch (err) {
@@ -331,7 +386,13 @@ export async function runAnalyzeTokenSupplyRisk(
   flat.result_integrity_hash = computeResultIntegrityHash(flat as unknown as Record<string, unknown>) || "";
   setCachedResult(cacheKey, flat);
   if (flat == null || (Array.isArray(flat) && flat.length === 0)) {
-    return { success: false, error: "EMPTY_ENGINE_RESULT", engine_latency_ms: 0 };
+    const noData = buildStructuredNoDataSupplyRisk(
+      symbol,
+      "registry",
+      "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+      0
+    );
+    return { success: true, data: noData };
   }
   return { success: true, data: flat };
 }
