@@ -692,13 +692,20 @@ async function handleAnalyzeTokenSupplyRisk(
         result.engine_latency_ms ?? 0
       );
       if (!isValidSupplyRiskResult(softFailure)) {
-        return jsonRpcError(id, -32603, "Internal result validation failed.");
+        logger.error("SUPPLY_VALIDATION_FAILED");
+        const fallback = buildSoftFailureSupplyRisk("VALIDATION_FAILED", result.engine_latency_ms ?? 0);
+        return normalizeSupplyRiskResult(fallback, id);
       }
       return normalizeSupplyRiskResult(softFailure, id);
     }
     const data = result.data;
     if (!isValidSupplyRiskResult(data)) {
-      return jsonRpcError(id, -32603, "Internal result validation failed.");
+      logger.error("SUPPLY_VALIDATION_FAILED");
+      const softFailure = buildSoftFailureSupplyRisk(
+        "VALIDATION_FAILED",
+        (data as { engine_latency_ms?: number } | undefined)?.engine_latency_ms ?? 0
+      );
+      return normalizeSupplyRiskResult(softFailure, id);
     }
     logger.error("SUPPLY_HANDLER_RETURNING_SUCCESS");
     logger.info(
@@ -711,7 +718,9 @@ async function handleAnalyzeTokenSupplyRisk(
     logger.error({ err, message, token }, "MCP analyze_token_supply_risk error");
     const softFailure = buildSoftFailureSupplyRisk(message, 0);
     if (!isValidSupplyRiskResult(softFailure)) {
-      return jsonRpcError(id, -32603, "Internal result validation failed.");
+      logger.error("SUPPLY_VALIDATION_FAILED");
+      const fallback = buildSoftFailureSupplyRisk("VALIDATION_FAILED", 0);
+      return normalizeSupplyRiskResult(fallback, id);
     }
     return normalizeSupplyRiskResult(softFailure, id);
   }
