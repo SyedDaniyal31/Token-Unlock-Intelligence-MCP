@@ -99,6 +99,8 @@ export interface SupplyRiskOutputFlat {
   cliff_detected: boolean;
   cliff_size_percent: number;
   next_estimated_unlock_timestamp: number | null;
+  /** "active" when there is a future unlock; "completed" when none (schedule ended or all past). */
+  unlock_schedule_status?: "active" | "completed";
   unlock_pattern_type: string;
   forward_risk_curve: ForwardRiskCurveExtended;
   volume_source_consistency_score: number;
@@ -201,6 +203,7 @@ export function buildSoftFailureSupplyRisk(
     data_freshness_seconds: 0,
     analysis_completion_status: "completed_no_data",
     data_availability_status: "completed_no_data",
+    unlock_schedule_status: "completed",
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   const ext = full as unknown as Record<string, unknown>;
@@ -246,6 +249,7 @@ export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): Suppl
     coverage: { registry_checked: false, dynamic_checked: true, records_found: 0 },
     analysis_completion_status: "completed_no_data",
     data_availability_status: "completed_no_data",
+    unlock_schedule_status: "completed",
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   const ext = full as unknown as Record<string, unknown>;
@@ -297,6 +301,7 @@ export function buildStructuredNoDataSupplyRisk(
     },
     analysis_completion_status: "completed_no_data",
     data_availability_status: "completed_no_data",
+    unlock_schedule_status: "completed",
     analysis_timestamp: analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: Math.max(0, Number.isFinite(dataFreshnessSeconds) ? dataFreshnessSeconds : 0),
@@ -357,8 +362,6 @@ export async function runAnalyzeTokenSupplyRisk(
       analysis_timestamp: analysisTimestamp,
       engine_version: ENGINE_VERSION,
       data_freshness_seconds: dataFreshnessSeconds,
-      analysis_completion_status: (cached as SupplyRiskOutputFlat).analysis_completion_status ?? "success",
-      data_availability_status: (cached as SupplyRiskOutputFlat).data_availability_status ?? "data_available",
     };
     return { success: true, data: enriched };
   }
@@ -414,6 +417,7 @@ export async function runAnalyzeTokenSupplyRisk(
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
       const full: SupplyRiskOutputFlat = {
         ...result,
+        unlock_schedule_status: result.next_estimated_unlock_timestamp != null ? "active" : "completed",
         engine_latency_ms,
         result_integrity_hash: "",
         analysis_timestamp: analysisTimestamp,
@@ -620,12 +624,16 @@ function mapRegistryResultToFlat(
     analysisTimestamp: string;
   }
 ): SupplyRiskOutputFlat {
-  const nextTs = vesting.next_cliff_date
+  const nowSec = Math.floor(context.executionNowMs / 1000);
+  const candidateNextTs = vesting.next_cliff_date
     ? (() => {
         const t = Date.parse(vesting.next_cliff_date);
         return Number.isNaN(t) ? null : Math.floor(t / 1000);
       })()
     : null;
+  const nextTs =
+    candidateNextTs != null && candidateNextTs > nowSec ? candidateNextTs : null;
+  const unlock_schedule_status = nextTs != null ? "active" : "completed";
   const score = Math.min(100, Math.max(0, riskAssessment.overall_risk_score));
   const unlockVariance = context.eventAmounts.length >= 2
     ? Math.min(1, variance(context.eventAmounts) / (mean(context.eventAmounts) ** 2 + 1))
@@ -745,6 +753,7 @@ function mapRegistryResultToFlat(
     cliff_detected: Boolean(vesting.has_cliff),
     cliff_size_percent: Math.min(100, Math.max(0, sanitizeNum(vesting.max_unlock_pct_supply))),
     next_estimated_unlock_timestamp: nextTs,
+    unlock_schedule_status,
     unlock_pattern_type: unlockPatternType,
     forward_risk_curve: forwardCurve,
     volume_source_consistency_score: Math.min(100, Math.max(0, volume_source_consistency_score)),

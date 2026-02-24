@@ -171,7 +171,15 @@ export async function generateUnlockIntelligence(
     };
   }
 
-  const nextUnlock = metadata?.vesting_end ?? null;
+  const vestingEnd = metadata?.vesting_end ?? null;
+  const nextUnlock =
+    vestingEnd != null
+      ? (() => {
+          const t = new Date(vestingEnd).getTime();
+          if (Number.isNaN(t)) return null;
+          return t > Date.now() ? vestingEnd : null;
+        })()
+      : null;
   const unlockAmount = supply.claimed_amount;
   const totalUpcomingUnlockAmount = supply.real_sellable_supply;
   const marketDataForLiquidity: MarketData = {

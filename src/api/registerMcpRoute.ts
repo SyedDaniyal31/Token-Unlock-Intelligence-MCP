@@ -137,6 +137,11 @@ const MCP_TOOLS = [
         cliff_detected: { type: "boolean" as const },
         cliff_size_percent: { type: "number" as const },
         next_estimated_unlock_timestamp: { type: ["number", "null"] as const },
+        unlock_schedule_status: {
+          type: "string" as const,
+          enum: ["active", "completed"] as const,
+          description: "active = future unlock scheduled; completed = no future unlock (schedule ended or all past).",
+        },
         unlock_pattern_type: { type: "string" as const },
         forward_risk_curve: {
           type: "object" as const,
