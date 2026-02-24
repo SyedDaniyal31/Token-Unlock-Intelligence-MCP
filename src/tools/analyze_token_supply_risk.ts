@@ -304,20 +304,25 @@ export async function runAnalyzeTokenSupplyRisk(
         volume30dUsd = market.volume24h * 0.85;
         if (market.volume24h > 0) volumeSources.push(volume30dUsd);
       }
-      const result = await Promise.race([
-        runDynamicSupplyEngine({
-          token_address: tokenAddress,
-          chain: chainSlug,
-          symbol: symbol || undefined,
-          volume30dUsd,
-          volumeSources: volumeSources.length > 0 ? volumeSources : undefined,
-          simulation_params: input.simulation_params,
-          executionNowMs,
-        }),
-        new Promise<never>((_, rej) =>
-          setTimeout(() => rej(new Error("Dynamic engine timed out")), DYNAMIC_ENGINE_TIMEOUT_MS)
-        ),
-      ]);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), DYNAMIC_ENGINE_TIMEOUT_MS);
+      let result: Awaited<ReturnType<typeof runDynamicSupplyEngine>>;
+      try {
+        result = await runDynamicSupplyEngine(
+          {
+            token_address: tokenAddress,
+            chain: chainSlug,
+            symbol: symbol || undefined,
+            volume30dUsd,
+            volumeSources: volumeSources.length > 0 ? volumeSources : undefined,
+            simulation_params: input.simulation_params,
+            executionNowMs,
+          },
+          { signal: controller.signal }
+        );
+      } finally {
+        clearTimeout(timeoutId);
+      }
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
       const full: SupplyRiskOutputFlat = {
         ...result,
@@ -362,7 +367,8 @@ export async function runAnalyzeTokenSupplyRisk(
       }
       return { success: true, data: full };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      let msg = err instanceof Error ? err.message : String(err);
+      if (msg === "Dynamic engine aborted") msg = "Dynamic engine timed out";
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
       return { success: false, error: msg, engine_latency_ms };
     }

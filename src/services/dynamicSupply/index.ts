@@ -6,4 +6,5 @@ export {
   defaultOutput,
   type DynamicSupplyInput,
   type DynamicSupplyOutput,
+  type RunDynamicSupplyEngineOptions,
 } from "./dynamicSupplyEngine.js";

@@ -3,6 +3,7 @@
  * Includes quantitative analytics: uncertainty, volume fusion, concentration, depth, emission momentum, optional shock simulation.
  */
 
+import logger from "../../core/logger.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
@@ -32,6 +33,10 @@ import {
 } from "../../core/quantitativeAnalytics.js";
 
 const REQUEST_TIMEOUT_MS = 8000;
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("Dynamic engine aborted");
+}
 
 /**
  * Internal deterministic test harness: same input → same output.
@@ -108,12 +113,21 @@ export interface DynamicSupplyInput {
   executionNowMs?: number;
 }
 
+export interface RunDynamicSupplyEngineOptions {
+  signal?: AbortSignal;
+}
+
 /**
- * Run dynamic supply engine with 8s timeout. Returns normalized metrics; never undefined/NaN.
+ * Run dynamic supply engine with optional abort signal for cancellation. Returns normalized metrics; never undefined/NaN.
  */
 export async function runDynamicSupplyEngine(
-  input: DynamicSupplyInput
+  input: DynamicSupplyInput,
+  options?: RunDynamicSupplyEngineOptions
 ): Promise<DynamicSupplyOutput> {
+  const t0 = Date.now();
+  const signal = options?.signal;
+  throwIfAborted(signal);
+
   const executionNowMs = typeof input.executionNowMs === "number" && Number.isFinite(input.executionNowMs)
     ? input.executionNowMs
     : Date.now();
@@ -139,26 +153,40 @@ export async function runDynamicSupplyEngine(
       totalSupply = totalSupply || cachedEntry.data.totalSupply;
       decimals = cachedEntry.data.decimals;
       supplySnapshotTs = cachedEntry.timestamp;
+      logger.error({ ms: 0, cached: true }, "STAGE_RPC_SUPPLY_DONE");
     } else {
+      const tRpcSupplyStart = Date.now();
       const snapshot = await readErc20SupplyFromRpc(chainKey, addr);
+      logger.error({ ms: Date.now() - tRpcSupplyStart }, "STAGE_RPC_SUPPLY_DONE");
+      throwIfAborted(signal);
       totalSupply = totalSupply || snapshot.totalSupply;
       decimals = snapshot.decimals;
       setSupplyInCache(addr, chainKey, snapshot);
     }
 
     if (Date.now() < deadline) {
+      const tBlockStart = Date.now();
       blockNumberUsed = await getCurrentBlock(chainKey);
+      logger.error({ ms: Date.now() - tBlockStart }, "STAGE_GET_CURRENT_BLOCK_DONE");
+      throwIfAborted(signal);
       if (blockNumberUsed > 0) {
+        const tBlockTsStart = Date.now();
         blockTimestampUsed = await getBlockTimestamp(chainKey, blockNumberUsed);
+        logger.error({ ms: Date.now() - tBlockTsStart }, "STAGE_GET_BLOCK_TIMESTAMP_DONE");
       }
+      throwIfAborted(signal);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "RPC_FAILURE") throw err;
+    if (msg === "Dynamic engine aborted") throw err;
+    logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, 0, 0, Math.floor(executionNowMs / 1000));
   }
 
+  throwIfAborted(signal);
   if (Date.now() >= deadline) {
+    logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
   }
 
@@ -175,6 +203,7 @@ export async function runDynamicSupplyEngine(
   let supplyVolatilityIndex = 0;
   let emissionAcceleration = 0;
 
+  const tUnlockStart = Date.now();
   const unlockScannerResult = await runUnlockScanner({
     chain: input.chain,
     tokenAddress: addr,
@@ -184,6 +213,8 @@ export async function runDynamicSupplyEngine(
     executionNowMs,
     deadlineMs: deadline,
   });
+  logger.error({ ms: Date.now() - tUnlockStart }, "STAGE_UNLOCK_SCANNER_DONE");
+  throwIfAborted(signal);
   if (unlockScannerResult && Date.now() < deadline) {
     inflation30d = Number(unlockScannerResult.inflationRate30d);
     inflation90d = Number(unlockScannerResult.inflationRate90d);
@@ -202,19 +233,23 @@ export async function runDynamicSupplyEngine(
   let liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
   const nextUnlockTs: number | null = null;
 
+  throwIfAborted(signal);
   let enrichment: Awaited<ReturnType<typeof getMarketEnrichment>> = null;
   if (Date.now() < deadline) {
     try {
+      const tEnrichStart = Date.now();
       enrichment = await getMarketEnrichment(
         input.symbol ?? "",
         chainKey,
         addr ?? null,
         executionNowMs
       );
+      logger.error({ ms: Date.now() - tEnrichStart }, "STAGE_MARKET_ENRICHMENT_DONE");
     } catch {
       enrichment = null;
     }
   }
+  throwIfAborted(signal);
 
   const priceForUnlock =
     enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
@@ -428,6 +463,7 @@ export async function runDynamicSupplyEngine(
     out.unlock_market_cap_impact = Number.isFinite(unlockMarketCapImpact) ? Math.max(0, unlockMarketCapImpact) : undefined;
   }
 
+  logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
   return out;
 }
 
