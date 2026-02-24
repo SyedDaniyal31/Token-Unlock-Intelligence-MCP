@@ -218,6 +218,32 @@ const MCP_TOOLS = [
           type: "number" as const,
           description: "How many seconds old the underlying data is.",
         },
+        unlock_model: {
+          type: "string" as const,
+          description: "Set when unlock intelligence is inferred (e.g. INFERRED_SUPPLY_SHOCK) when no scanner/registry data.",
+        },
+        inference_source: {
+          type: "string" as const,
+          description: "Source of inferred unlock metrics (e.g. dynamic_supply_model).",
+        },
+        confidence_score: {
+          type: "number" as const,
+          description: "Confidence in inferred unlock metrics (0–100).",
+        },
+        unlock_data_source: {
+          type: "string" as const,
+          enum: ["registry", "scanner", "inferred"] as const,
+          description: "Unlock intelligence source: registry > scanner > inferred.",
+        },
+        supply_shock_index: {
+          type: "number" as const,
+          description: "Supply Shock Fusion Index (SSI) 0–100.",
+        },
+        supply_shock_risk_tier: {
+          type: "string" as const,
+          enum: ["LOW", "MODERATE", "HIGH", "EXTREME"] as const,
+          description: "SSI risk tier: 0–25 LOW, 26–50 MODERATE, 51–75 HIGH, 76–100 EXTREME.",
+        },
       },
       required: [
         "model_metadata",

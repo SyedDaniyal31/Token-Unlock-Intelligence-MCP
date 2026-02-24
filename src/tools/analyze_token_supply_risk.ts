@@ -44,6 +44,7 @@ import {
   computeDataQualityScore,
 } from "../core/quantitativeAnalytics.js";
 import { computeResultIntegrityHash } from "../core/resultIntegrity.js";
+import { computeSupplyShockFusion } from "../intelligence/supplyShockFusion.js";
 import {
   canonicalCacheKey,
   getCachedResult,
@@ -125,6 +126,17 @@ export interface SupplyRiskOutputFlat {
   liquidity_usd?: number;
   unlock_amount_usd?: number;
   unlock_market_cap_impact?: number;
+  /** Supply shock inference layer: set when unlock data is inferred (no scanner/registry). */
+  unlock_model?: string;
+  inference_source?: string;
+  confidence_score?: number;
+  /** Unlock intelligence source: registry > scanner > inferred. */
+  unlock_data_source?: "registry" | "scanner" | "inferred";
+  /** Supply Shock Fusion Index (0–100) and risk tier. */
+  supply_shock_index?: number;
+  supply_shock_risk_tier?: string;
+  /** True when SSI cascade boost was applied (high unlock + high liquidity stress). */
+  cascade_risk_detected?: boolean;
   /** Explicit no-data signaling for Context compatibility. Always set when risk_tier === "NO_DATA". */
   search_exhausted?: boolean;
   records_found?: number;
@@ -639,6 +651,14 @@ function mapRegistryResultToFlat(
     }))
   );
 
+  const ssi = computeSupplyShockFusion({
+    unlock_pressure_ratio: sanitizeNum(liquidity.unlock_to_volume_ratio),
+    liquidity_stress_score: liquidityStress,
+    supply_volatility_index: Math.min(100, Math.max(0, supplyVolatilityIndex)),
+    inflation_rate_30d: sanitizeNum(emission.supply_growth_30d_pct),
+    confidence_score: 100,
+  });
+
   return {
     model_metadata: buildModelMetadata(),
     data_freshness: buildDataFreshness({
@@ -687,6 +707,10 @@ function mapRegistryResultToFlat(
       unlock_data_available: true,
       confidence_basis: "unlock_events",
     },
+    unlock_data_source: "registry",
+    supply_shock_index: ssi.supply_shock_index,
+    supply_shock_risk_tier: ssi.supply_shock_risk_tier,
+    cascade_risk_detected: ssi.cascade_risk_detected,
     analysis_timestamp: context.analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,

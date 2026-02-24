@@ -11,6 +11,8 @@ import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
+import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../intelligence/supplyShockInference.js";
+import { computeSupplyShockFusion } from "../intelligence/supplyShockFusion.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,
@@ -94,6 +96,17 @@ export interface DynamicSupplyOutput {
   liquidity_usd?: number;
   unlock_amount_usd?: number;
   unlock_market_cap_impact?: number;
+  /** Set when unlock intelligence is inferred (no scanner/registry data). */
+  unlock_model?: string;
+  inference_source?: string;
+  confidence_score?: number;
+  /** Unlock intelligence source: registry > scanner > inferred. */
+  unlock_data_source?: "registry" | "scanner" | "inferred";
+  /** Supply Shock Fusion Index (0–100) and risk tier. */
+  supply_shock_index?: number;
+  supply_shock_risk_tier?: string;
+  /** True when high unlock + high liquidity stress triggered SSI cascade boost. */
+  cascade_risk_detected?: boolean;
 }
 
 function toNum(x: unknown): number {
@@ -533,6 +546,36 @@ export async function runDynamicSupplyEngine(
     },
   };
 
+  const unlock_data_available =
+    unlockScannerResult != null &&
+    (Number(unlockScannerResult.inflationRate30d) !== 0 || Number(unlockScannerResult.inflationRate90d) !== 0);
+  out.unlock_data_source = unlock_data_available ? "scanner" : "inferred";
+
+  if (shouldApplySupplyShockInference(unlock_data_available)) {
+    const inferred = inferSupplyShockUnlock({
+      inflation_rate_30d: out.inflation_rate_30d,
+      supply_volatility_index: out.supply_volatility_index,
+      liquidity_stress_score: out.liquidity_stress_score,
+      emission_trend: out.emission_trend,
+      holder_data_confidence_score: out.holder_data_confidence_score,
+      liquidity_data_available:
+        enrichment != null && Number.isFinite(enrichment.liquidityUsd) && enrichment.liquidityUsd > 0,
+      market_enrichment_available: enrichment != null,
+      block_freshness_hint: blockNumberUsed > 0 ? 1 : 0,
+    });
+    out.unlock_pressure_ratio = Number(Number(inferred.synthetic_unlock_pressure).toFixed(4));
+    out.unlock_pressure_classification = inferred.unlock_pressure_classification;
+    out.unlock_model = inferred.unlock_model;
+    out.inference_source = inferred.inference_source;
+    out.confidence_score = inferred.confidence_score;
+    out.analysis_provenance = {
+      primary_model: "dynamic_unlock",
+      fallback_used: true,
+      unlock_data_available: false,
+      confidence_basis: "mixed",
+    };
+  }
+
   if (enrichment != null) {
     out.market_cap_usd = Number.isFinite(enrichment.marketCapUsd) ? Math.max(0, enrichment.marketCapUsd) : undefined;
     out.volume_24h_usd = Number.isFinite(enrichment.volume24hUsd) ? Math.max(0, enrichment.volume24hUsd) : undefined;
@@ -591,6 +634,17 @@ export async function runDynamicSupplyEngine(
       confidence_basis: "unlock_events",
     };
   }
+
+  const ssi = computeSupplyShockFusion({
+    unlock_pressure_ratio: out.unlock_pressure_ratio,
+    liquidity_stress_score: out.liquidity_stress_score,
+    supply_volatility_index: out.supply_volatility_index,
+    inflation_rate_30d: out.inflation_rate_30d,
+    confidence_score: out.confidence_score ?? 100,
+  });
+  out.supply_shock_index = ssi.supply_shock_index;
+  out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
+  if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
 
   logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
   setMemoizedResult(memoKey, blockNumberUsed, out);
@@ -674,5 +728,7 @@ export function defaultOutput(
       unlock_data_available: false,
       confidence_basis: "holder_distribution",
     },
+    supply_shock_index: 0,
+    supply_shock_risk_tier: "LOW",
   };
 }
