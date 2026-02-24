@@ -11,8 +11,8 @@ import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
-import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../intelligence/supplyShockInference.js";
-import { computeSupplyShockFusion } from "../intelligence/supplyShockFusion.js";
+import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
+import { computeSupplyShockFusion } from "../../intelligence/supplyShockFusion.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,

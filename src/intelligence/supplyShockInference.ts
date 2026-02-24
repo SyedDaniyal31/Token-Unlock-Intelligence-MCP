@@ -75,7 +75,7 @@ function computeInferenceConfidence(input: SupplyShockInferenceInput): number {
   const holderConf = clamp(fin(input.holder_data_confidence_score) / 100, 0, 1);
   const liquidityOk = input.liquidity_data_available === true ? 1 : 0;
   const enrichmentOk = input.market_enrichment_available === true ? 1 : 0;
-  const blockFresh = clamp(fin(input.block_freshness_hint), 0, 1);
+  const blockFresh = clamp(fin(input.block_freshness_hint ?? 0), 0, 1);
   const score = (holderConf * 0.4 + liquidityOk * 0.25 + enrichmentOk * 0.2 + blockFresh * 0.15) * 100;
   return Math.round(clamp(score, 0, 100));
 }
