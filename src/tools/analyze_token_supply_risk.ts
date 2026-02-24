@@ -133,7 +133,7 @@ export interface SupplyRiskOutputFlat {
   inference_source?: string;
   confidence_score?: number;
   /** Unlock intelligence source: registry > scanner > inferred. */
-  unlock_data_source?: "registry" | "scanner" | "inferred";
+  unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
   /** Supply Shock Fusion Index (0–100) and risk tier. */
   supply_shock_index?: number;
   supply_shock_risk_tier?: string;

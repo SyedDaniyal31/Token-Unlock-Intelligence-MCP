@@ -8,7 +8,7 @@ import { acquireDynamicEngineSlot } from "../../core/engineConcurrencyGuard.js";
 import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnalyzer.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
-import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
+import { resolveUnifiedUnlockIntelligence } from "../../intelligence/unifiedUnlockResolver.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
@@ -100,8 +100,8 @@ export interface DynamicSupplyOutput {
   unlock_model?: string;
   inference_source?: string;
   confidence_score?: number;
-  /** Unlock intelligence source: registry > scanner > inferred. */
-  unlock_data_source?: "registry" | "scanner" | "inferred";
+  /** Unlock intelligence source: registry > external_calendar > scanner > inferred. */
+  unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
   /** Supply Shock Fusion Index (0–100) and risk tier. */
   supply_shock_index?: number;
   supply_shock_risk_tier?: string;
@@ -294,46 +294,47 @@ export async function runDynamicSupplyEngine(
   }
   throwIfAborted(signal);
 
-  let unlockScannerResult: Awaited<ReturnType<typeof runUnlockScanner>> = null;
-  if (await shouldRunUnlockScanner(addr, chainKey, totalSupply, supplyFromCache, enrichment)) {
-    const tUnlockStart = Date.now();
-    unlockScannerResult = await runUnlockScanner(
-      {
-        chain: input.chain,
-        tokenAddress: addr,
-        circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
-        volume30dUsd: volume30d,
-        price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
-        executionNowMs,
-        deadlineMs: deadline,
-      },
-      { signal, deadline }
-    );
-    logger.error({ ms: Date.now() - tUnlockStart }, "STAGE_UNLOCK_SCANNER_DONE");
-  } else {
-    logger.warn(
-      { token: input.symbol },
-      "UNLOCK_SCANNER_SKIPPED_LOW_PROBABILITY"
-    );
-  }
+  // Unified Unlock Intelligence Layer Integration
+  const tUnlockStart = Date.now();
+  const unlockIntel = await resolveUnifiedUnlockIntelligence({
+    tokenAddress: addr,
+    tokenSymbol: input.symbol,
+    chain: input.chain,
+  });
+  logger.error({ ms: Date.now() - tUnlockStart, source: unlockIntel.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
-  if (unlockScannerResult && Date.now() < deadline) {
-    inflation30d = Number(unlockScannerResult.inflationRate30d);
-    inflation90d = Number(unlockScannerResult.inflationRate90d);
-    unlockPressureRatio = Number(unlockScannerResult.unlockPressureRatio);
-    cliffDetected = Boolean(unlockScannerResult.cliffDetected);
-    const pt = unlockScannerResult.unlockPatternType;
-    unlockPatternType = (pt === "linear" || pt === "burst" ? pt : "unknown") as UnlockPatternType;
-    supplyVolatilityIndex = Number(unlockScannerResult.supplyVolatilityIndex);
-    emissionAcceleration = Number(unlockScannerResult.emissionAccelerationScore);
+
+  let nextUnlockTs: number | null = unlockIntel.nextUnlockTimestamp ?? null;
+  if (unlockIntel.unlockPressureRatio != null && Number.isFinite(unlockIntel.unlockPressureRatio)) {
+    unlockPressureRatio = Number(unlockIntel.unlockPressureRatio);
+  }
+  if (unlockIntel.unlockEvents != null && unlockIntel.unlockEvents.length > 0) {
+    const priceForUnlockCalc =
+      enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
+        ? enrichment.priceUsd
+        : toNum(input.price);
+    const totalUnlockTokens = unlockIntel.unlockEvents.reduce(
+      (sum, e) => sum + (Number.isFinite(Number(e.amount)) ? Number(e.amount) : 0),
+      0
+    );
+    if (volume30d > 0 && priceForUnlockCalc > 0 && totalUnlockTokens > 0) {
+      const pressureFromEvents = (totalUnlockTokens * priceForUnlockCalc) / volume30d;
+      if (Number.isFinite(pressureFromEvents) && (unlockIntel.unlockPressureRatio == null || !Number.isFinite(unlockIntel.unlockPressureRatio))) {
+        unlockPressureRatio = pressureFromEvents;
+      }
+    }
   }
   if (Number.isFinite(unlockPressureRatio) === false) unlockPressureRatio = 0;
   const pressureRatioClean = Math.max(0, unlockPressureRatio);
+  const unlock_data_available =
+    unlockIntel.source !== "inferred" &&
+    ( (unlockIntel.unlockEvents != null && unlockIntel.unlockEvents.length > 0) ||
+      unlockIntel.nextUnlockTimestamp != null ||
+      (unlockIntel.unlockPressureRatio != null && Number(unlockIntel.unlockPressureRatio) > 0) );
   const emissionTrend = 0;
   const cliffPct = 0;
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, inflation30d, cliffPct);
   let liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
-  const nextUnlockTs: number | null = null;
   throwIfAborted(signal);
 
   const priceForUnlock =
@@ -428,7 +429,7 @@ export async function runDynamicSupplyEngine(
   const { fused_volume_30d_usd, volume_source_consistency_score } = computeVolumeFusion(volumeSources);
   const volumeVariance = 1 - Math.min(100, Math.max(0, volume_source_consistency_score)) / 100;
   if (!Number.isFinite(inflation90d)) inflation90d = inflation30d * 3;
-  if (unlockScannerResult == null) {
+  if (!unlock_data_available) {
     supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
   }
   const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
@@ -454,7 +455,7 @@ export async function runDynamicSupplyEngine(
     unlockPressureRatio: pressureRatioClean,
   });
 
-  if (unlockScannerResult == null) {
+  if (!unlock_data_available) {
     emissionAcceleration = computeEmissionAcceleration([]);
   }
 
@@ -546,10 +547,10 @@ export async function runDynamicSupplyEngine(
     },
   };
 
-  const unlock_data_available =
-    unlockScannerResult != null &&
-    (Number(unlockScannerResult.inflationRate30d) !== 0 || Number(unlockScannerResult.inflationRate90d) !== 0);
-  out.unlock_data_source = unlock_data_available ? "scanner" : "inferred";
+  // Unified Unlock Intelligence Layer: set source and data availability (inferred → allow inference block).
+  out.unlock_data_source = unlockIntel.source;
+  out.next_estimated_unlock_timestamp = nextUnlockTs;
+  out.analysis_provenance.unlock_data_available = unlock_data_available;
 
   if (shouldApplySupplyShockInference(unlock_data_available)) {
     const inferred = inferSupplyShockUnlock({
@@ -584,9 +585,7 @@ export async function runDynamicSupplyEngine(
     out.unlock_market_cap_impact = Number.isFinite(unlockMarketCapImpact) ? Math.max(0, unlockMarketCapImpact) : undefined;
   }
 
-  const noUnlockEvents =
-    unlockScannerResult == null ||
-    (Number(unlockScannerResult.inflationRate30d) === 0 && Number(unlockScannerResult.inflationRate90d) === 0);
+  const noUnlockEvents = !unlock_data_available;
   const shouldUseHolderFallback =
     noUnlockEvents || unlockPatternType === "unknown" || dataQualityScore < 10;
 

@@ -247,8 +247,8 @@ const MCP_TOOLS = [
         },
         unlock_data_source: {
           type: "string" as const,
-          enum: ["registry", "scanner", "inferred"] as const,
-          description: "Unlock intelligence source: registry > scanner > inferred.",
+          enum: ["registry", "external_calendar", "scanner", "inferred"] as const,
+          description: "Unlock intelligence source: registry > external_calendar > scanner > inferred.",
         },
         supply_shock_index: {
           type: "number" as const,
