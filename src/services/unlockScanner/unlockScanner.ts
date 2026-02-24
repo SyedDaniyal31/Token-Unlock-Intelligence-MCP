@@ -21,6 +21,9 @@ const BLOCKS_90D_ETH = 90 * 7200;
 const BLOCKS_90D_BSC = 90 * 28800;
 const BLOCKS_90D_ARB = 90 * 21600;
 
+/** Hard cap on block range to avoid unbounded scans (~365d ETH). */
+const MAX_BLOCK_RANGE = 500_000;
+
 function blocks90d(chain: UnlockScannerChain): number {
   switch (chain) {
     case "ethereum": return BLOCKS_90D_ETH;
@@ -81,12 +84,23 @@ function setCachedUnlockResult(
   cache.set(k, { result, storedAt: Date.now() });
 }
 
+export interface RunUnlockScannerOptions {
+  signal?: AbortSignal;
+  deadline?: number;
+}
+
 /**
- * Run full unlock pipeline. Returns null on failure or timeout. Never throws.
+ * Run full unlock pipeline. Returns null on failure or timeout. Throws on abort/deadline when options provided.
  */
-export async function runUnlockScanner(input: UnlockScannerInput): Promise<UnlockScannerOutput | null> {
+export async function runUnlockScanner(
+  input: UnlockScannerInput,
+  options?: RunUnlockScannerOptions
+): Promise<UnlockScannerOutput | null> {
   const { chain, tokenAddress, circulatingSupply, volume30dUsd, price, executionNowMs, deadlineMs } = input;
   const addr = tokenAddress.startsWith("0x") ? tokenAddress : "0x" + tokenAddress;
+
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
 
   const cached = getCachedUnlockResult(chain, addr, executionNowMs);
   if (cached) return cached;
@@ -96,10 +110,14 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
 
   let discovery;
   try {
-    discovery = await discoverToken(chain, addr, executionNowMs, deadlineMs);
-  } catch {
+    discovery = await discoverToken(chain, addr, executionNowMs, deadlineMs, options);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "Dynamic engine aborted" || msg === "Unlock scanner deadline exceeded") throw e;
     return null;
   }
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
   if (Date.now() >= deadlineMs) return null;
 
   const getBlockTs = (blockNumber: number) => getBlockTimestamp(chain, blockNumber);
@@ -112,9 +130,12 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
       discovery.totalSupply,
       getBlockTs,
       deadlineMs,
-      executionNowMs
+      executionNowMs,
+      options
     );
-  } catch {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "Dynamic engine aborted" || msg === "Unlock scanner deadline exceeded") throw e;
     mintResult = {
       mintEvents: [],
       inflationRate30d: 0,
@@ -122,9 +143,13 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
       emissionAccelerationScore: 0,
     };
   }
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
   if (Date.now() >= deadlineMs) return null;
 
   const currentBlock = await getCurrentBlock(chain);
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
   if (currentBlock <= 0) {
     const out: UnlockScannerOutput = {
       ...aggregateUnlockMetrics(
@@ -140,7 +165,9 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
     return out;
   }
 
-  const startBlock = Math.max(0, currentBlock - blocks90d(chain));
+  const range90d = blocks90d(chain);
+  const cappedRange = Math.min(range90d, MAX_BLOCK_RANGE);
+  const startBlock = Math.max(0, currentBlock - cappedRange);
   let allLogs: NormalizedLog[];
   try {
     allLogs = await getLogs(chain, {
@@ -148,10 +175,16 @@ export async function runUnlockScanner(input: UnlockScannerInput): Promise<Unloc
       fromBlock: startBlock,
       toBlock: currentBlock,
       topics: [TRANSFER_TOPIC],
+      signal: options?.signal,
+      deadline: options?.deadline,
     });
-  } catch {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === "Dynamic engine aborted" || msg === "Unlock scanner deadline exceeded") throw e;
     allLogs = [];
   }
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
   if (Date.now() >= deadlineMs) return null;
 
   const transferList = buildTransferList(allLogs, discovery.decimals);

@@ -48,11 +48,18 @@ export interface MintScannerResult {
   emissionAccelerationScore: number;
 }
 
+const MAX_BLOCK_RANGE = 500_000;
+
+export interface UnlockScannerOptions {
+  signal?: AbortSignal;
+  deadline?: number;
+}
+
 /**
  * Scan Transfer logs (from = zero) in last 90 days. Build mint events with block timestamps.
  * Uses log.timestamp when present (explorer API); otherwise getBlockTimestamp for RPC path.
  * executionNowMs used for 30d/60d window boundaries (deterministic); omit to fall back to current time.
- * Never throws; returns empty/zero on failure.
+ * Throws on abort/deadline when options provided.
  */
 export async function scanMints(
   chain: UnlockScannerChain,
@@ -61,21 +68,26 @@ export async function scanMints(
   totalSupply: number,
   getBlockTimestamp: (blockNumber: number) => Promise<number>,
   deadlineMs: number,
-  executionNowMs?: number
+  executionNowMs?: number,
+  options?: UnlockScannerOptions
 ): Promise<MintScannerResult> {
   const addr = tokenAddress.startsWith("0x") ? tokenAddress : "0x" + tokenAddress;
+  if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+  if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
   const currentBlock = await getCurrentBlock(chain);
   if (currentBlock <= 0 || Date.now() >= deadlineMs) {
     return { mintEvents: [], inflationRate30d: 0, inflationRate90d: 0, emissionAccelerationScore: 0 };
   }
 
-  const window = blocksIn90Days(chain);
+  const window = Math.min(blocksIn90Days(chain), MAX_BLOCK_RANGE);
   const startBlock = Math.max(0, currentBlock - window);
   const logs = await getLogs(chain, {
     address: addr,
     fromBlock: startBlock,
     toBlock: currentBlock,
     topics: [TRANSFER_TOPIC],
+    signal: options?.signal,
+    deadline: options?.deadline,
   });
 
   const divisor = 10 ** (decimals >= 0 && decimals <= 255 ? decimals : 18);

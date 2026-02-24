@@ -204,15 +204,18 @@ export async function runDynamicSupplyEngine(
   let emissionAcceleration = 0;
 
   const tUnlockStart = Date.now();
-  const unlockScannerResult = await runUnlockScanner({
-    chain: input.chain,
-    tokenAddress: addr,
-    circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
-    volume30dUsd: volume30d,
-    price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
-    executionNowMs,
-    deadlineMs: deadline,
-  });
+  const unlockScannerResult = await runUnlockScanner(
+    {
+      chain: input.chain,
+      tokenAddress: addr,
+      circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
+      volume30dUsd: volume30d,
+      price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
+      executionNowMs,
+      deadlineMs: deadline,
+    },
+    { signal, deadline }
+  );
   logger.error({ ms: Date.now() - tUnlockStart }, "STAGE_UNLOCK_SCANNER_DONE");
   throwIfAborted(signal);
   if (unlockScannerResult && Date.now() < deadline) {

@@ -14,6 +14,11 @@ export interface TokenDiscoveryResult {
   firstMintBlock?: number;
 }
 
+export interface UnlockScannerOptions {
+  signal?: AbortSignal;
+  deadline?: number;
+}
+
 /**
  * Detect first mint block by scanning Transfer logs where topic1 (from) = zero address.
  * Scans backwards from current block in chunks; returns first (lowest) block found.
@@ -22,18 +27,23 @@ async function detectFirstMintBlock(
   chain: UnlockScannerChain,
   address: string,
   toBlock: number,
-  deadlineMs: number
+  deadlineMs: number,
+  options?: UnlockScannerOptions
 ): Promise<number | undefined> {
   const addr = address.startsWith("0x") ? address : "0x" + address;
   const chunk = 5000;
   let fromBlock = Math.max(0, toBlock - chunk * 10);
   let firstBlock: number | undefined;
   while (fromBlock <= toBlock && Date.now() < deadlineMs) {
+    if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+    if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
     const logs = await getLogs(chain, {
       address: addr,
       fromBlock,
       toBlock: Math.min(fromBlock + chunk - 1, toBlock),
       topics: [TRANSFER_TOPIC],
+      signal: options?.signal,
+      deadline: options?.deadline,
     });
     for (const log of logs) {
       const fromTopic = log.topics[1];
@@ -48,13 +58,14 @@ async function detectFirstMintBlock(
 }
 
 /**
- * Returns totalSupply, decimals, and optional firstMintBlock. Never throws.
+ * Returns totalSupply, decimals, and optional firstMintBlock. Throws on abort/deadline when options provided.
  */
 export async function discoverToken(
   chain: UnlockScannerChain,
   address: string,
   executionNowMs: number,
-  deadlineMs: number
+  deadlineMs: number,
+  options?: UnlockScannerOptions
 ): Promise<TokenDiscoveryResult> {
   const addr = address.startsWith("0x") ? address : "0x" + address;
   let totalSupply = 0;
@@ -70,9 +81,11 @@ export async function discoverToken(
 
   let firstMintBlock: number | undefined;
   if (Date.now() < deadlineMs) {
+    if (options?.signal?.aborted) throw new Error("Dynamic engine aborted");
+    if (options?.deadline != null && Date.now() > options.deadline) throw new Error("Unlock scanner deadline exceeded");
     const currentBlock = await getCurrentBlock(chain);
     if (currentBlock > 0) {
-      firstMintBlock = await detectFirstMintBlock(chain, addr, currentBlock, deadlineMs);
+      firstMintBlock = await detectFirstMintBlock(chain, addr, currentBlock, deadlineMs, options);
     }
   }
 

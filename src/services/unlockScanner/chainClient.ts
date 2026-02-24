@@ -22,6 +22,9 @@ export interface GetLogsParams {
   fromBlock: number;
   toBlock: number;
   topics?: (string | string[] | null)[];
+  /** When set, abort iteration if signal is aborted or deadline exceeded. */
+  signal?: AbortSignal;
+  deadline?: number;
 }
 
 const REQUEST_TIMEOUT_MS = 6000;
@@ -394,6 +397,8 @@ export async function getLogs(
   let useExplorerOnly = false;
 
   for (let f = from; f <= to; f += CHUNK_SIZE) {
+    if (params.signal?.aborted) throw new Error("Dynamic engine aborted");
+    if (params.deadline != null && Date.now() > params.deadline) throw new Error("Unlock scanner deadline exceeded");
     const t = Math.min(f + CHUNK_SIZE - 1, to);
     if (useExplorerOnly) {
       const chunkLogs = await fetchOneChunkViaExplorer(chain, address, f, t, topics);
