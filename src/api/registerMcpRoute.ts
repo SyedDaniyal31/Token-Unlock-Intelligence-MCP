@@ -858,11 +858,6 @@ export function registerMcpRoute(
       }
 
       const methodName = typeof method === "string" ? method : "";
-      const isToolsCallMethod =
-        methodName === "callTool" ||
-        methodName === "tools/call" ||
-        methodName === "analyze_token_supply_risk" ||
-        methodName === "analyze_token_unlock";
 
       let response: JsonRpcSuccess | JsonRpcErrorBody;
 
@@ -907,7 +902,13 @@ export function registerMcpRoute(
         }
       }
       response = ensureFlatResultPayload(response, requestId);
-      if (isToolsCallMethod) {
+      if (
+        (methodName === "callTool" || methodName === "tools/call") &&
+        "result" in response &&
+        (response as JsonRpcSuccess).result &&
+        typeof (response as JsonRpcSuccess).result === "object" &&
+        !Array.isArray((response as JsonRpcSuccess).result)
+      ) {
         response = addToolsCallContentCompat(response);
       }
       if ("result" in response) {
