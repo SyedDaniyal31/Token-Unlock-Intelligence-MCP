@@ -173,7 +173,18 @@ const MCP_TOOLS = [
         holder_data_confidence_score: { type: "number" as const },
         combined_volatility_index: { type: "number" as const },
         pattern_confidence_score: { type: "number" as const },
-        analysis_scope: { type: "string" as const, enum: ["dynamic", "registry", "hybrid"] as const },
+        analysis_scope: { type: "string" as const, enum: ["dynamic", "registry", "hybrid", "dynamic_fallback"] as const },
+        analysis_provenance: {
+          type: "object" as const,
+          description: "Intelligence provenance: which model produced the result and why.",
+          properties: {
+            primary_model: { type: "string" as const, enum: ["registry", "dynamic_unlock", "holder_distribution"] as const },
+            fallback_used: { type: "boolean" as const },
+            unlock_data_available: { type: "boolean" as const },
+            confidence_basis: { type: "string" as const, enum: ["unlock_events", "holder_distribution", "mixed"] as const },
+          },
+          required: ["primary_model", "fallback_used", "unlock_data_available", "confidence_basis"] as const,
+        },
         search_exhausted: {
           type: "boolean" as const,
           description: "True when all data sources were checked but no records were found.",
@@ -241,6 +252,7 @@ const MCP_TOOLS = [
         "combined_volatility_index",
         "pattern_confidence_score",
         "analysis_scope",
+        "analysis_provenance",
         "analysis_timestamp",
         "engine_version",
         "data_freshness_seconds",
@@ -474,7 +486,17 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const patternConf = o.pattern_confidence_score;
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
-  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid";
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback";
+  const provenance = o.analysis_provenance;
+  const validProvenance =
+    provenance == null ||
+    (typeof provenance === "object" &&
+      !Array.isArray(provenance) &&
+      (provenance as Record<string, unknown>).primary_model !== undefined &&
+      (provenance as Record<string, unknown>).fallback_used === !!((provenance as Record<string, unknown>).fallback_used) &&
+      (provenance as Record<string, unknown>).unlock_data_available === !!((provenance as Record<string, unknown>).unlock_data_available) &&
+      ["registry", "dynamic_unlock", "holder_distribution"].includes((provenance as Record<string, unknown>).primary_model as string) &&
+      ["unlock_events", "holder_distribution", "mixed"].includes((provenance as Record<string, unknown>).confidence_basis as string));
   const marketCapUsd = o.market_cap_usd;
   const validMarketCapUsd = marketCapUsd === undefined || (typeof marketCapUsd === "number" && Number.isFinite(marketCapUsd) && marketCapUsd >= 0);
   const volume24hUsd = o.volume_24h_usd;
@@ -533,6 +555,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
     validCombinedVol &&
     validPatternConf &&
     validScope &&
+    validProvenance &&
     validMarketCapUsd &&
     validVolume24hUsd &&
     validLiquidityUsd &&
@@ -727,10 +750,9 @@ async function handleAnalyzeTokenSupplyRisk(
       return normalizeSupplyRiskResult(softFailure, id);
     }
     if (!result.success) {
-      const softFailure = buildSoftFailureSupplyRisk(
-        result.error,
-        result.engine_latency_ms ?? 0
-      );
+      const reason = result.error === "Dynamic engine busy" ? "ENGINE_CONCURRENCY_LIMIT" : result.error;
+      const elapsedMs = result.engine_latency_ms ?? 0;
+      const softFailure = buildSoftFailureSupplyRisk(reason, elapsedMs);
       if (!isValidSupplyRiskResult(softFailure)) {
         logger.error("SUPPLY_VALIDATION_FAILED");
         const fallback = buildSoftFailureSupplyRisk("VALIDATION_FAILED", result.engine_latency_ms ?? 0);

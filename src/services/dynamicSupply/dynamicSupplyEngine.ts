@@ -4,10 +4,13 @@
  */
 
 import logger from "../../core/logger.js";
+import { acquireDynamicEngineSlot } from "../../core/engineConcurrencyGuard.js";
+import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnalyzer.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
+import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { runUnlockScanner } from "../unlockScanner/unlockScanner.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
-import { getMarketEnrichment } from "../marketData/marketEnrichment.js";
+import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,
@@ -78,7 +81,13 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback";
+  analysis_provenance: {
+    primary_model: "registry" | "dynamic_unlock" | "holder_distribution";
+    fallback_used: boolean;
+    unlock_data_available: boolean;
+    confidence_basis: "unlock_events" | "holder_distribution" | "mixed";
+  };
   /** Optional enrichment from CoinGecko + DeFiLlama. */
   market_cap_usd?: number;
   volume_24h_usd?: number;
@@ -95,6 +104,41 @@ function toNum(x: unknown): number {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+const LIQUIDITY_FREE_FLOAT_THRESHOLD_USD = 10_000_000;
+const TOKEN_AGE_FREE_FLOAT_DAYS = 180;
+const HOLDER_CONCENTRATION_FREE_FLOAT_PCT = 40;
+
+/**
+ * Fast pre-check: skip expensive unlock scanning when token looks like a free-float asset (no vesting/unlock structure).
+ * Returns true when we SHOULD run the scanner; false when all free-float conditions hold and we can skip.
+ */
+async function shouldRunUnlockScanner(
+  tokenAddress: string,
+  chain: "ethereum" | "arbitrum" | "bsc",
+  totalSupply: number,
+  supplyStable: boolean,
+  marketData?: MarketEnrichment | null,
+  tokenAgeDays?: number,
+  topHolderConcentrationPct?: number
+): Promise<boolean> {
+  const inflationRate30d = 0; // no prior unlock data before scanning
+  const noVestingFound = true; // we have not run scanner yet
+  const liquidityUsd = marketData != null && Number.isFinite(marketData.liquidityUsd) ? marketData.liquidityUsd : 0;
+  const liquidityOk = liquidityUsd > LIQUIDITY_FREE_FLOAT_THRESHOLD_USD;
+  const tokenAgeOk = tokenAgeDays == null || tokenAgeDays > TOKEN_AGE_FREE_FLOAT_DAYS;
+  const concentrationOk = topHolderConcentrationPct == null || topHolderConcentrationPct < HOLDER_CONCENTRATION_FREE_FLOAT_PCT;
+
+  const allFreeFloat =
+    inflationRate30d === 0 &&
+    supplyStable &&
+    liquidityOk &&
+    tokenAgeOk &&
+    noVestingFound &&
+    concentrationOk;
+
+  return !allFreeFloat;
 }
 
 export interface DynamicSupplyInput {
@@ -128,6 +172,8 @@ export async function runDynamicSupplyEngine(
   const signal = options?.signal;
   throwIfAborted(signal);
 
+  const releaseSlot = await acquireDynamicEngineSlot(signal);
+  try {
   const executionNowMs = typeof input.executionNowMs === "number" && Number.isFinite(input.executionNowMs)
     ? input.executionNowMs
     : Date.now();
@@ -143,6 +189,7 @@ export async function runDynamicSupplyEngine(
   let blockNumberUsed = 0;
   let blockTimestampUsed = 0;
 
+  let supplyFromCache = false;
   try {
     if (getRpcUrl(chainKey) == null) {
       throw new Error("RPC_FAILURE");
@@ -150,6 +197,7 @@ export async function runDynamicSupplyEngine(
 
     const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
     if (cachedEntry && cachedEntry.data.totalSupply >= 0) {
+      supplyFromCache = true;
       totalSupply = totalSupply || cachedEntry.data.totalSupply;
       decimals = cachedEntry.data.decimals;
       supplySnapshotTs = cachedEntry.timestamp;
@@ -190,6 +238,18 @@ export async function runDynamicSupplyEngine(
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
   }
 
+  const memoKey = `${chainKey}:${addr.toLowerCase()}`;
+  if (blockNumberUsed > 0) {
+    const memoHit = getMemoizedResult(memoKey, blockNumberUsed);
+    if (memoHit != null) {
+      logger.warn(
+        { token: input.symbol },
+        "INTELLIGENCE_MEMO_HIT"
+      );
+      return memoHit;
+    }
+  }
+
   const supplySafe = Math.max(1, totalSupply);
   const volume30d = Math.max(0, toNum(input.volume30dUsd));
   let unlockPressureRatio =
@@ -203,20 +263,46 @@ export async function runDynamicSupplyEngine(
   let supplyVolatilityIndex = 0;
   let emissionAcceleration = 0;
 
-  const tUnlockStart = Date.now();
-  const unlockScannerResult = await runUnlockScanner(
-    {
-      chain: input.chain,
-      tokenAddress: addr,
-      circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
-      volume30dUsd: volume30d,
-      price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
-      executionNowMs,
-      deadlineMs: deadline,
-    },
-    { signal, deadline }
-  );
-  logger.error({ ms: Date.now() - tUnlockStart }, "STAGE_UNLOCK_SCANNER_DONE");
+  throwIfAborted(signal);
+  let enrichment: Awaited<ReturnType<typeof getMarketEnrichment>> = null;
+  if (Date.now() < deadline) {
+    try {
+      const tEnrichStart = Date.now();
+      enrichment = await getMarketEnrichment(
+        input.symbol ?? "",
+        chainKey,
+        addr ?? null,
+        executionNowMs
+      );
+      logger.error({ ms: Date.now() - tEnrichStart }, "STAGE_MARKET_ENRICHMENT_DONE");
+    } catch {
+      enrichment = null;
+    }
+  }
+  throwIfAborted(signal);
+
+  let unlockScannerResult: Awaited<ReturnType<typeof runUnlockScanner>> = null;
+  if (await shouldRunUnlockScanner(addr, chainKey, totalSupply, supplyFromCache, enrichment)) {
+    const tUnlockStart = Date.now();
+    unlockScannerResult = await runUnlockScanner(
+      {
+        chain: input.chain,
+        tokenAddress: addr,
+        circulatingSupply: Math.max(1, toNum(input.circulatingSupply) || supplySafe),
+        volume30dUsd: volume30d,
+        price: toNum(input.price) > 0 ? toNum(input.price) : undefined,
+        executionNowMs,
+        deadlineMs: deadline,
+      },
+      { signal, deadline }
+    );
+    logger.error({ ms: Date.now() - tUnlockStart }, "STAGE_UNLOCK_SCANNER_DONE");
+  } else {
+    logger.warn(
+      { token: input.symbol },
+      "UNLOCK_SCANNER_SKIPPED_LOW_PROBABILITY"
+    );
+  }
   throwIfAborted(signal);
   if (unlockScannerResult && Date.now() < deadline) {
     inflation30d = Number(unlockScannerResult.inflationRate30d);
@@ -235,23 +321,6 @@ export async function runDynamicSupplyEngine(
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, inflation30d, cliffPct);
   let liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
   const nextUnlockTs: number | null = null;
-
-  throwIfAborted(signal);
-  let enrichment: Awaited<ReturnType<typeof getMarketEnrichment>> = null;
-  if (Date.now() < deadline) {
-    try {
-      const tEnrichStart = Date.now();
-      enrichment = await getMarketEnrichment(
-        input.symbol ?? "",
-        chainKey,
-        addr ?? null,
-        executionNowMs
-      );
-      logger.error({ ms: Date.now() - tEnrichStart }, "STAGE_MARKET_ENRICHMENT_DONE");
-    } catch {
-      enrichment = null;
-    }
-  }
   throwIfAborted(signal);
 
   const priceForUnlock =
@@ -456,6 +525,12 @@ export async function runDynamicSupplyEngine(
     combined_volatility_index: Math.min(100, Math.max(0, combinedVolatilityIndex)),
     pattern_confidence_score: Math.min(100, Math.max(0, patternConfidenceScore)),
     analysis_scope: "dynamic",
+    analysis_provenance: {
+      primary_model: "dynamic_unlock",
+      fallback_used: false,
+      unlock_data_available: true,
+      confidence_basis: "unlock_events",
+    },
   };
 
   if (enrichment != null) {
@@ -466,8 +541,63 @@ export async function runDynamicSupplyEngine(
     out.unlock_market_cap_impact = Number.isFinite(unlockMarketCapImpact) ? Math.max(0, unlockMarketCapImpact) : undefined;
   }
 
+  const noUnlockEvents =
+    unlockScannerResult == null ||
+    (Number(unlockScannerResult.inflationRate30d) === 0 && Number(unlockScannerResult.inflationRate90d) === 0);
+  const shouldUseHolderFallback =
+    noUnlockEvents || unlockPatternType === "unknown" || dataQualityScore < 10;
+
+  if (shouldUseHolderFallback) {
+    const holderDeadline = Math.min(deadline, Date.now() + 2000);
+    try {
+      throwIfAborted(signal);
+      const holderResult = await runHolderDistributionAnalysis(
+        {
+          chain: chainKey,
+          tokenAddress: addr,
+          totalSupply: totalSupply,
+          enrichment:
+            enrichment != null
+              ? {
+                  marketCapUsd: enrichment.marketCapUsd,
+                  liquidityUsd: enrichment.liquidityUsd,
+                  circulatingSupply: enrichment.circulatingSupply,
+                }
+              : undefined,
+        },
+        { signal, deadline: holderDeadline }
+      );
+      out.top_holder_concentration_score = holderResult.top_holder_concentration_score;
+      out.treasury_exposure_score = holderResult.treasury_exposure_score;
+      out.combined_volatility_index = Math.min(100, Math.max(0, holderResult.combined_volatility_index));
+      out.risk_flags = [...out.risk_flags, "HOLDER_CONCENTRATION_MODE"];
+      out.analysis_scope = "dynamic_fallback";
+      out.analysis_provenance = {
+        primary_model: "holder_distribution",
+        fallback_used: true,
+        unlock_data_available: false,
+        confidence_basis: "holder_distribution",
+      };
+    } catch {
+      /* keep existing out; do not overwrite with NO_DATA */
+    }
+  }
+
+  if (out.analysis_provenance == null) {
+    out.analysis_provenance = {
+      primary_model: "dynamic_unlock",
+      fallback_used: false,
+      unlock_data_available: true,
+      confidence_basis: "unlock_events",
+    };
+  }
+
   logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+  setMemoizedResult(memoKey, blockNumberUsed, out);
   return out;
+  } finally {
+    releaseSlot();
+  }
 }
 
 function computeLiquidityStressScore(
@@ -538,5 +668,11 @@ export function defaultOutput(
     risk_flags: ["NO_DATA"],
     risk_tier: "NO_DATA",
     data_quality_score: 0,
+    analysis_provenance: {
+      primary_model: "dynamic_unlock",
+      fallback_used: false,
+      unlock_data_available: false,
+      confidence_basis: "holder_distribution",
+    },
   };
 }

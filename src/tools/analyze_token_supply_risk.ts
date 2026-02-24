@@ -77,6 +77,13 @@ export interface SupplyRiskInput {
 export type ForwardRiskCurveFlat = ForwardRiskCurveExtended;
 export type LiquidityDepthProfileFlat = LiquidityDepthProfile;
 
+export interface AnalysisProvenance {
+  primary_model: "registry" | "dynamic_unlock" | "holder_distribution";
+  fallback_used: boolean;
+  unlock_data_available: boolean;
+  confidence_basis: "unlock_events" | "holder_distribution" | "mixed";
+}
+
 export interface SupplyRiskOutputFlat {
   model_metadata: ModelMetadata;
   data_freshness: DataFreshness;
@@ -109,7 +116,9 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback";
+  /** Intelligence provenance: which model produced the result and why. Always set on success. */
+  analysis_provenance: AnalysisProvenance;
   /** Optional enrichment (market_cap_usd, volume_24h_usd, liquidity_usd, unlock_amount_usd, unlock_market_cap_impact). */
   market_cap_usd?: number;
   volume_24h_usd?: number;
@@ -164,6 +173,12 @@ export function buildSoftFailureSupplyRisk(
     combined_volatility_index: 0,
     pattern_confidence_score: 0,
     analysis_scope: "dynamic",
+    analysis_provenance: {
+      primary_model: "registry",
+      fallback_used: false,
+      unlock_data_available: false,
+      confidence_basis: "holder_distribution",
+    },
     analysis_timestamp: ts,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,
@@ -203,6 +218,12 @@ export function buildStructuredNoDataSupplyRisk(
     combined_volatility_index: 0,
     pattern_confidence_score: 0,
     analysis_scope: analysisScope,
+    analysis_provenance: {
+      primary_model: "registry",
+      fallback_used: false,
+      unlock_data_available: false,
+      confidence_basis: "holder_distribution",
+    },
     search_exhausted: true,
     records_found: 0,
     no_results_reason,
@@ -660,6 +681,12 @@ function mapRegistryResultToFlat(
     combined_volatility_index: Math.min(100, Math.max(0, combinedVolatilityIndex)),
     pattern_confidence_score: Math.min(100, Math.max(0, patternConfidenceScore)),
     analysis_scope: "registry",
+    analysis_provenance: {
+      primary_model: "registry",
+      fallback_used: false,
+      unlock_data_available: true,
+      confidence_basis: "unlock_events",
+    },
     analysis_timestamp: context.analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,
