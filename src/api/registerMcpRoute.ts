@@ -349,6 +349,23 @@ function ensureFlatResultPayload(
   return response;
 }
 
+/**
+ * Compatibility envelope for clients that only read result.content from tools/call.
+ * Preserves the flat object contract by keeping all flat fields at the top level.
+ */
+function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody): JsonRpcSuccess | JsonRpcErrorBody {
+  if (!("result" in response)) return response;
+  const r = (response as JsonRpcSuccess).result;
+  if (r == null || typeof r !== "object" || Array.isArray(r)) return response;
+  const obj = r as Record<string, unknown>;
+  if (Array.isArray(obj.content)) return response;
+  (response as JsonRpcSuccess).result = {
+    ...obj,
+    content: [{ type: "json", json: obj }],
+  };
+  return response;
+}
+
 const TOOL_TIMEOUT_MS = 35_000;
 
 export interface UnlockResultShape {
@@ -837,6 +854,7 @@ export function registerMcpRoute(
       }
 
       const methodName = typeof method === "string" ? method : "";
+      const isToolsCallMethod = methodName === "callTool" || methodName === "tools/call";
 
       let response: JsonRpcSuccess | JsonRpcErrorBody;
 
@@ -881,6 +899,9 @@ export function registerMcpRoute(
         }
       }
       response = ensureFlatResultPayload(response, requestId);
+      if (isToolsCallMethod) {
+        response = addToolsCallContentCompat(response);
+      }
       if ("result" in response) {
         if (Array.isArray((response as JsonRpcSuccess).result) || (response as JsonRpcSuccess).result == null) {
           response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
@@ -900,4 +921,3 @@ export function registerMcpRoute(
   };
   app.post("/mcp", ...middleware, handler);
 }
-
