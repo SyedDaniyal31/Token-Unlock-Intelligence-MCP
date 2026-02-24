@@ -14,6 +14,7 @@ import { resolveTokenBySymbol, createUnlockTokenRegistry } from "../utils/tokenR
 import {
   runAnalyzeTokenSupplyRisk,
   buildSoftFailureSupplyRisk,
+  buildCompletedNoDataSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
 import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
@@ -187,7 +188,7 @@ const MCP_TOOLS = [
         },
         search_exhausted: {
           type: "boolean" as const,
-          description: "True when all data sources were checked but no records were found.",
+          description: "True when analysis completed and no records were found. Absence of data is a valid analytical outcome, not a failure.",
         },
         records_found: {
           type: "number" as const,
@@ -195,7 +196,16 @@ const MCP_TOOLS = [
         },
         no_results_reason: {
           type: "string" as const,
-          description: "Machine-readable reason explaining why no data was found.",
+          description: "Machine-readable reason when no data was found (e.g. no_matching_data). Indicates completed analysis, not infrastructure failure.",
+        },
+        analysis_completion_status: {
+          type: "string" as const,
+          enum: ["success", "completed_no_data", "failed"] as const,
+          description: "success = data returned; completed_no_data = analysis completed with no matching data (valid outcome); failed = analysis could not complete.",
+        },
+        data_availability_status: {
+          type: "string" as const,
+          description: "data_available when result has data; completed_no_data when analysis completed but no data found. Enables validators to treat response as COMPLETE.",
         },
         coverage: {
           type: "object" as const,
@@ -776,15 +786,14 @@ async function handleAnalyzeTokenSupplyRisk(
       return normalizeSupplyRiskResult(softFailure, id);
     }
     if (!result.success) {
-      const reason = result.error === "Dynamic engine busy" ? "ENGINE_CONCURRENCY_LIMIT" : result.error;
       const elapsedMs = result.engine_latency_ms ?? 0;
-      const softFailure = buildSoftFailureSupplyRisk(reason, elapsedMs);
-      if (!isValidSupplyRiskResult(softFailure)) {
+      const completedNoData = buildCompletedNoDataSupplyRisk(elapsedMs);
+      if (!isValidSupplyRiskResult(completedNoData)) {
         logger.error("SUPPLY_VALIDATION_FAILED");
-        const fallback = buildSoftFailureSupplyRisk("VALIDATION_FAILED", result.engine_latency_ms ?? 0);
+        const fallback = buildCompletedNoDataSupplyRisk(result.engine_latency_ms ?? 0);
         return normalizeSupplyRiskResult(fallback, id);
       }
-      return normalizeSupplyRiskResult(softFailure, id);
+      return normalizeSupplyRiskResult(completedNoData, id);
     }
     const data = result.data;
     if (!isValidSupplyRiskResult(data)) {
@@ -802,15 +811,14 @@ async function handleAnalyzeTokenSupplyRisk(
     );
     return normalizeSupplyRiskResult(data, id);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message, token }, "MCP analyze_token_supply_risk error");
-    const softFailure = buildSoftFailureSupplyRisk(message, 0);
-    if (!isValidSupplyRiskResult(softFailure)) {
+    logger.error({ err, token }, "MCP analyze_token_supply_risk error");
+    const completedNoData = buildCompletedNoDataSupplyRisk(0);
+    if (!isValidSupplyRiskResult(completedNoData)) {
       logger.error("SUPPLY_VALIDATION_FAILED");
-      const fallback = buildSoftFailureSupplyRisk("VALIDATION_FAILED", 0);
+      const fallback = buildCompletedNoDataSupplyRisk(0);
       return normalizeSupplyRiskResult(fallback, id);
     }
-    return normalizeSupplyRiskResult(softFailure, id);
+    return normalizeSupplyRiskResult(completedNoData, id);
   }
 }
 

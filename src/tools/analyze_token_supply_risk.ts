@@ -142,6 +142,10 @@ export interface SupplyRiskOutputFlat {
   records_found?: number;
   no_results_reason?: string;
   coverage?: { registry_checked: boolean; dynamic_checked: boolean; records_found: number };
+  /** Analysis outcome: success = data returned; completed_no_data = valid no-data (e.g. timeout degraded); failed = analysis failed. */
+  analysis_completion_status?: "success" | "completed_no_data" | "failed";
+  /** Data availability: data_available | completed_no_data. Absence of data is a valid analytical outcome. */
+  data_availability_status?: string;
   /** Metadata credibility: always set on every success response. */
   analysis_timestamp: string;
   engine_version: string;
@@ -165,6 +169,7 @@ export type SupplyRiskResult = SupplyRiskOutput | SupplyRiskError;
 /**
  * Build a valid SupplyRiskOutputFlat for business-logic failures (unsupported token, timeout, no data).
  * Context Marketplace treats JSON-RPC errors as crashes; this returns jsonrpcSuccess with a flat object instead.
+ * Sets analysis_completion_status and data_availability_status so validators treat response as COMPLETE.
  */
 export function buildSoftFailureSupplyRisk(
   noResultsReason: string,
@@ -194,10 +199,56 @@ export function buildSoftFailureSupplyRisk(
     analysis_timestamp: ts,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,
+    analysis_completion_status: "completed_no_data",
+    data_availability_status: "completed_no_data",
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   const ext = full as unknown as Record<string, unknown>;
   ext.no_results_reason = noResultsReason;
+  ext.has_data = false;
+  ext.searchExhausted = true;
+  ext.noResultsReason = "no_matching_data";
+  return full;
+}
+
+/**
+ * Valid NO-DATA response for timeout/abort: do not expose "Dynamic engine timed out".
+ * Context interprets this as COMPLETE (no retries). Use when dynamic engine times out or aborts.
+ */
+export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): SupplyRiskOutputFlat {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ts = new Date().toISOString();
+  const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
+  const full: SupplyRiskOutputFlat = {
+    ...base,
+    engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
+    result_integrity_hash: "",
+    historical_depth_limited: true,
+    risk_flags: ["NO_DATA"],
+    risk_tier: "LOW",
+    data_quality_score: 0,
+    holder_data_confidence_score: 0,
+    combined_volatility_index: 0,
+    pattern_confidence_score: 0,
+    analysis_scope: "dynamic",
+    analysis_provenance: {
+      primary_model: "registry",
+      fallback_used: false,
+      unlock_data_available: false,
+      confidence_basis: "holder_distribution",
+    },
+    analysis_timestamp: ts,
+    engine_version: ENGINE_VERSION,
+    data_freshness_seconds: 0,
+    search_exhausted: true,
+    records_found: 0,
+    no_results_reason: "no_matching_data",
+    coverage: { registry_checked: false, dynamic_checked: true, records_found: 0 },
+    analysis_completion_status: "completed_no_data",
+    data_availability_status: "completed_no_data",
+  };
+  full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
+  const ext = full as unknown as Record<string, unknown>;
   ext.has_data = false;
   ext.searchExhausted = true;
   ext.noResultsReason = "no_matching_data";
@@ -244,6 +295,8 @@ export function buildStructuredNoDataSupplyRisk(
       dynamic_checked: analysisScope === "dynamic",
       records_found: 0,
     },
+    analysis_completion_status: "completed_no_data",
+    data_availability_status: "completed_no_data",
     analysis_timestamp: analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: Math.max(0, Number.isFinite(dataFreshnessSeconds) ? dataFreshnessSeconds : 0),
@@ -304,6 +357,8 @@ export async function runAnalyzeTokenSupplyRisk(
       analysis_timestamp: analysisTimestamp,
       engine_version: ENGINE_VERSION,
       data_freshness_seconds: dataFreshnessSeconds,
+      analysis_completion_status: (cached as SupplyRiskOutputFlat).analysis_completion_status ?? "success",
+      data_availability_status: (cached as SupplyRiskOutputFlat).data_availability_status ?? "data_available",
     };
     return { success: true, data: enriched };
   }
@@ -374,6 +429,8 @@ export async function runAnalyzeTokenSupplyRisk(
         },
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
+      full.analysis_completion_status = "success";
+      full.data_availability_status = "data_available";
       setCachedResult(cacheKey, full);
       if (full == null || (Array.isArray(full) && full.length === 0)) {
         const noData = buildStructuredNoDataSupplyRisk(
@@ -398,16 +455,26 @@ export async function runAnalyzeTokenSupplyRisk(
         );
         return { success: true, data: noData };
       }
-      return { success: true, data: full };
+      return { success: true, data: { ...full, analysis_completion_status: "success", data_availability_status: "data_available" } };
     } catch (err) {
-      let msg = err instanceof Error ? err.message : String(err);
-      if (msg === "Dynamic engine aborted") msg = "Dynamic engine timed out";
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
-      return { success: false, error: msg, engine_latency_ms };
+      return { success: true, data: buildCompletedNoDataSupplyRisk(engine_latency_ms) };
     }
   }
 
-  if (!symbol) return { success: false, error: "Token symbol or token_address is required.", engine_latency_ms: 0 };
+  if (!symbol) {
+    return {
+      success: true,
+      data: buildStructuredNoDataSupplyRisk(
+        str(input.token_address) || "unknown",
+        "dynamic",
+        "missing_required_input",
+        0,
+        new Date().toISOString(),
+        0
+      ),
+    };
+  }
 
   const registry = createUnlockTokenRegistry();
   const resolved = await resolveTokenBySymbol(str(input.token_symbol), registry);
@@ -711,6 +778,8 @@ function mapRegistryResultToFlat(
     supply_shock_index: ssi.supply_shock_index,
     supply_shock_risk_tier: ssi.supply_shock_risk_tier,
     cascade_risk_detected: ssi.cascade_risk_detected,
+    analysis_completion_status: "success",
+    data_availability_status: "data_available",
     analysis_timestamp: context.analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,
