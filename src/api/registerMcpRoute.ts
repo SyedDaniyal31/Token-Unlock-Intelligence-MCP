@@ -350,18 +350,22 @@ function ensureFlatResultPayload(
 }
 
 /**
- * Compatibility envelope for clients that only read result.content from tools/call.
- * Preserves the flat object contract by keeping all flat fields at the top level.
+ * MCP tools/call result shape: content[] with type "text" and string "text" (Context/Zod expect this, not type "json").
+ * See https://modelcontextprotocol.io/specification/2025-11-25/server/tools — Tool Result content is TextContent.
  */
 function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody): JsonRpcSuccess | JsonRpcErrorBody {
   if (!("result" in response)) return response;
   const r = (response as JsonRpcSuccess).result;
   if (r == null || typeof r !== "object" || Array.isArray(r)) return response;
   const obj = r as Record<string, unknown>;
-  if (Array.isArray(obj.content)) return response;
+  if (Array.isArray(obj.content) && obj.content.length > 0) {
+    const first = obj.content[0] as Record<string, unknown> | undefined;
+    if (first?.type === "text" && typeof first.text === "string") return response;
+  }
   (response as JsonRpcSuccess).result = {
     ...obj,
-    content: [{ type: "json", json: obj }],
+    content: [{ type: "text" as const, text: JSON.stringify(obj) }],
+    isError: false,
   };
   return response;
 }
@@ -854,7 +858,11 @@ export function registerMcpRoute(
       }
 
       const methodName = typeof method === "string" ? method : "";
-      const isToolsCallMethod = methodName === "callTool" || methodName === "tools/call";
+      const isToolsCallMethod =
+        methodName === "callTool" ||
+        methodName === "tools/call" ||
+        methodName === "analyze_token_supply_risk" ||
+        methodName === "analyze_token_unlock";
 
       let response: JsonRpcSuccess | JsonRpcErrorBody;
 
@@ -907,7 +915,18 @@ export function registerMcpRoute(
           response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
         }
       }
-      logger.error({ response }, "FINAL_JSON_RPC_RESPONSE_SENT");
+      logger.error(
+        {
+          id: requestId,
+          method: methodName,
+          hasResult: "result" in response,
+          resultKeys:
+            "result" in response && (response as JsonRpcSuccess).result != null && typeof (response as JsonRpcSuccess).result === "object" && !Array.isArray((response as JsonRpcSuccess).result)
+              ? Object.keys((response as JsonRpcSuccess).result as object).slice(0, 15)
+              : null,
+        },
+        "FINAL_JSON_RPC_RESPONSE_SENT"
+      );
       safeSend(res, response);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
