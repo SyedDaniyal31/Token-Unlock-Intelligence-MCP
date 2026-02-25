@@ -180,8 +180,12 @@ const CRYPTORANK_UNLOCK_URL = "https://api.cryptorank.io/v1/unlock";
  */
 async function fetchCryptoRankUnlocks(apiKey: string): Promise<CryptoRankUnlockRaw[]> {
   const url = `${CRYPTORANK_UNLOCK_URL}?api_key=${encodeURIComponent(apiKey)}`;
+  console.log("Calling CryptoRank API...");
   const response = await fetch(url);
+  console.log("CryptoRank response status:", response.status);
   if (!response.ok) {
+    const text = await response.text();
+    console.log("CryptoRank non-200 response body:", text);
     logger.warn({ status: response.status, statusText: response.statusText }, "CryptoRank unlock API non-200");
     return [];
   }
@@ -244,6 +248,8 @@ async function upsertOne(event: ExternalUnlockEvent): Promise<void> {
  * Safe for cron: never throws; logs errors. Runs after DB connection is established.
  */
 export async function ingestExternalUnlocks(): Promise<void> {
+  console.log("=== INGEST FUNCTION ENTERED ===");
+  console.log("CRYPTORANK_API_KEY PRESENT:", !!process.env.CRYPTORANK_API_KEY);
   try {
     const apiKey = config.CRYPTORANK_API_KEY;
     if (!apiKey) {
@@ -282,6 +288,7 @@ export async function ingestExternalUnlocks(): Promise<void> {
       "CryptoRank unlock ingestion completed"
     );
   } catch (err) {
+    console.error("CryptoRank ingestion error", err);
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank ingestion failed");
   }
 }

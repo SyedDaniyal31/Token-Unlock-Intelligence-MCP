@@ -75,21 +75,40 @@ app.get("/mcp", (_req: Request, res: Response): void => {
 const verifyContextAuth = createContextMiddleware();
 registerMcpRoute(app, deps, [verifyContextAuth]);
 
+// Manual ingestion route (temporary for debugging)
+app.post("/admin/ingest-unlocks", async (_req: Request, res: Response) => {
+  console.log("=== MANUAL INGEST TRIGGERED ===");
+  try {
+    await ingestExternalUnlocks();
+    res.json({ status: "ingestion_triggered" });
+  } catch (err) {
+    console.error("Manual ingestion failed", err);
+    res.status(500).json({ error: "ingestion_failed" });
+  }
+});
+
 app.use(errorHandler);
 
 let httpServer: HttpServer | null = null;
 
-const precomputeCron = cron.schedule("0 */6 * * *", () => {
-  syncUnlockRegistryToDb()
-    .then(() => runFullIngestionCycle(deps))
-    .then(() => ingestExternalUnlocks())
-    .then(() => runUnlockPrecompute())
-    .catch((err: Error) => {
-      logger.error({ err, scope: "cron" }, "Ingestion cron error");
-    });
+console.log("=== CRON REGISTERED ===");
+const precomputeCron = cron.schedule("0 */6 * * *", async () => {
+  console.log("=== CRON TRIGGERED ===");
+  try {
+    await syncUnlockRegistryToDb();
+    await runFullIngestionCycle(deps);
+    await ingestExternalUnlocks();
+    console.log("=== CRON INGEST COMPLETED ===");
+    await runUnlockPrecompute();
+  } catch (err: unknown) {
+    console.error("CRON INGEST FAILED", err);
+    logger.error({ err, scope: "cron" }, "Ingestion cron error");
+  }
 });
 
 export function start(port: number): HttpServer {
+  console.log("=== SERVER STARTED ===");
+  console.log("NODE_ENV:", process.env.NODE_ENV);
   httpServer = app.listen(port, (): void => {
     logger.info({ port }, "Server listening");
     syncUnlockRegistryToDb()

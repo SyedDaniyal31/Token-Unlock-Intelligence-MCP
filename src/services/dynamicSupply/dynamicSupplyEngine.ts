@@ -214,11 +214,11 @@ export async function runDynamicSupplyEngine(
       totalSupply = totalSupply || cachedEntry.data.totalSupply;
       decimals = cachedEntry.data.decimals;
       supplySnapshotTs = cachedEntry.timestamp;
-      logger.error({ ms: 0, cached: true }, "STAGE_RPC_SUPPLY_DONE");
+      logger.info({ ms: 0, cached: true }, "STAGE_RPC_SUPPLY_DONE");
     } else {
       const tRpcSupplyStart = Date.now();
       const snapshot = await readErc20SupplyFromRpc(chainKey, addr);
-      logger.error({ ms: Date.now() - tRpcSupplyStart }, "STAGE_RPC_SUPPLY_DONE");
+      logger.info({ ms: Date.now() - tRpcSupplyStart }, "STAGE_RPC_SUPPLY_DONE");
       throwIfAborted(signal);
       totalSupply = totalSupply || snapshot.totalSupply;
       decimals = snapshot.decimals;
@@ -228,12 +228,12 @@ export async function runDynamicSupplyEngine(
     if (Date.now() < deadline) {
       const tBlockStart = Date.now();
       blockNumberUsed = await getCurrentBlock(chainKey);
-      logger.error({ ms: Date.now() - tBlockStart }, "STAGE_GET_CURRENT_BLOCK_DONE");
+      logger.info({ ms: Date.now() - tBlockStart }, "STAGE_GET_CURRENT_BLOCK_DONE");
       throwIfAborted(signal);
       if (blockNumberUsed > 0) {
         const tBlockTsStart = Date.now();
         blockTimestampUsed = await getBlockTimestamp(chainKey, blockNumberUsed);
-        logger.error({ ms: Date.now() - tBlockTsStart }, "STAGE_GET_BLOCK_TIMESTAMP_DONE");
+        logger.info({ ms: Date.now() - tBlockTsStart }, "STAGE_GET_BLOCK_TIMESTAMP_DONE");
       }
       throwIfAborted(signal);
     }
@@ -241,13 +241,13 @@ export async function runDynamicSupplyEngine(
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "RPC_FAILURE") throw err;
     if (msg === "Dynamic engine aborted") throw err;
-    logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+    logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, 0, 0, Math.floor(executionNowMs / 1000));
   }
 
   throwIfAborted(signal);
   if (Date.now() >= deadline) {
-    logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+    logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
   }
 
@@ -287,7 +287,7 @@ export async function runDynamicSupplyEngine(
         addr ?? null,
         executionNowMs
       );
-      logger.error({ ms: Date.now() - tEnrichStart }, "STAGE_MARKET_ENRICHMENT_DONE");
+      logger.info({ ms: Date.now() - tEnrichStart }, "STAGE_MARKET_ENRICHMENT_DONE");
     } catch {
       enrichment = null;
     }
@@ -301,7 +301,7 @@ export async function runDynamicSupplyEngine(
     tokenSymbol: input.symbol,
     chain: input.chain,
   });
-  logger.error({ ms: Date.now() - tUnlockStart, source: unlockIntel.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
+  logger.info({ ms: Date.now() - tUnlockStart, source: unlockIntel.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
 
   let nextUnlockTs: number | null = unlockIntel.nextUnlockTimestamp ?? null;
@@ -645,7 +645,7 @@ export async function runDynamicSupplyEngine(
   out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
   if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
 
-  logger.error({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+  logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
   setMemoizedResult(memoKey, blockNumberUsed, out);
   return out;
   } finally {

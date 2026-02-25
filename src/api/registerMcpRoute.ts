@@ -738,7 +738,7 @@ async function handleAnalyzeTokenSupplyRisk(
     args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? (args.chain as ChainSlug) : undefined;
   const timeframeDays = typeof args.timeframe_days === "number" ? args.timeframe_days : undefined;
   let tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
-  logger.error({ token: token || undefined, token_address: tokenAddress, chain: chainSlug }, "SUPPLY_HANDLER_ENTERED");
+  logger.info({ token: token || undefined, token_address: tokenAddress, chain: chainSlug }, "SUPPLY_HANDLER_ENTERED");
   const rawSim = args.simulation_params;
   let simulation_params: { price_shock_pct?: number; volume_shock_pct?: number; unlock_multiplier?: number } | undefined;
   if (rawSim != null && typeof rawSim === "object" && !Array.isArray(rawSim)) {
@@ -809,7 +809,7 @@ async function handleAnalyzeTokenSupplyRisk(
       );
       return normalizeSupplyRiskResult(softFailure, id);
     }
-    logger.error("SUPPLY_HANDLER_RETURNING_SUCCESS");
+    logger.info("SUPPLY_HANDLER_RETURNING_SUCCESS");
     logger.info(
       { tool: SUPPLY_RISK_TOOL_NAME, token, liquidity_stress_score: data.liquidity_stress_score },
       "MCP callTool success"
@@ -842,7 +842,7 @@ async function handleCallTool(
       ? (params as { name?: unknown; arguments?: unknown })
       : {};
   const name = typeof p.name === "string" ? p.name : "";
-  logger.error({ name }, "CALL_TOOL_ENTERED");
+  logger.info({ name }, "CALL_TOOL_ENTERED");
   const rawArgs = p.arguments;
   const args = parseArguments(rawArgs);
 

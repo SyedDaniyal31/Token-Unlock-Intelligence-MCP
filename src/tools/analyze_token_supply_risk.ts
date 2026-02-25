@@ -385,7 +385,7 @@ export async function runAnalyzeTokenSupplyRisk(
   }
 
   if (tokenAddress && chainSlug) {
-    logger.error({ token: symbol || tokenAddress, chain: chainSlug }, "DYNAMIC_PATH_EXECUTED");
+    logger.info({ token: symbol || tokenAddress, chain: chainSlug }, "DYNAMIC_PATH_EXECUTED");
     const engineStart = Date.now();
     try {
       let volume30dUsd = 0;
