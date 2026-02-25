@@ -34,4 +34,9 @@ export const config = {
     const p = getEnv("PORT");
     return p ? Number(p) : 3000;
   },
+  /** CryptoRank API key for external unlock calendar. Optional; ingestion disabled when missing. */
+  get CRYPTORANK_API_KEY(): string | null {
+    const v = getEnv("CRYPTORANK_API_KEY");
+    return v && String(v).trim() ? String(v).trim() : null;
+  },
 } as const;

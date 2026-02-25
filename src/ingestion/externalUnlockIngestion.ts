@@ -1,10 +1,12 @@
 /**
  * External unlock ingestion: normalize and upsert external calendar data
  * into unlock_events_external. Safe for cron; does not throw fatal errors.
+ * CryptoRank API integration.
  */
 
 import { query } from "../infrastructure/database/postgres.js";
 import logger from "../core/logger.js";
+import { config } from "../core/config.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,6 +44,18 @@ export interface RawExternalUnlock {
   [key: string]: unknown;
 }
 
+/** CryptoRank API unlock item (e.g. from /v1/unlock). */
+export interface CryptoRankUnlockRaw {
+  symbol?: string;
+  platform?: string;
+  unlock_date?: string;
+  date?: string;
+  amount?: number;
+  percent?: number;
+  type?: string;
+  [key: string]: unknown;
+}
+
 const CATEGORIES = new Set<string>(["team", "investor", "ecosystem", "unknown"]);
 
 function toCategory(s: unknown): "team" | "investor" | "ecosystem" | "unknown" {
@@ -60,8 +74,32 @@ function toStr(x: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Map CryptoRank platform to chain slug (EVM → ethereum). */
+function chainFromPlatform(platform: unknown): string {
+  const p = typeof platform === "string" ? platform.trim().toLowerCase() : "";
+  if (!p) return "ethereum";
+  if (p.includes("ethereum") || p === "eth") return "ethereum";
+  if (p.includes("arbitrum") || p === "arb") return "arbitrum";
+  if (p.includes("bsc") || p.includes("bnb")) return "bsc";
+  return "ethereum";
+}
+
+/** Parse ISO date or numeric timestamp to Unix seconds. */
+function parseUnlockTimestamp(raw: CryptoRankUnlockRaw): number | null {
+  const iso = raw.unlock_date ?? raw.date;
+  if (typeof iso === "string" && iso.trim()) {
+    const t = Date.parse(iso.trim());
+    if (Number.isFinite(t)) return Math.floor(t / 1000);
+  }
+  const ts = toNum(raw.unlock_timestamp ?? raw.timestamp, NaN);
+  if (Number.isFinite(ts)) {
+    return ts > 1e12 ? Math.floor(ts / 1000) : Math.floor(ts);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
-// Normalize
+// Normalize (generic)
 // ---------------------------------------------------------------------------
 
 /**
@@ -94,48 +132,93 @@ export function normalizeExternalUnlock(raw: RawExternalUnlock): ExternalUnlockE
 }
 
 // ---------------------------------------------------------------------------
-// Fetch (mock)
+// Normalize CryptoRank
 // ---------------------------------------------------------------------------
 
-// TODO: integrate TokenUnlocks / CryptoRank API
+const CRYPTORANK_CONFIDENCE = 80;
 
 /**
- * Fetch external unlock data. Mock returns empty array; replace with real API.
- * Must not throw; return [] on any failure.
+ * Map CryptoRank unlock item to ExternalUnlockEvent. Returns null if event
+ * should be skipped (past or unlock_percent === 0).
  */
-async function fetchExternalUnlockData(): Promise<RawExternalUnlock[]> {
-  try {
-    // Mock: no hardcoded tokens or dates; real integration will call external API.
-    return [];
-  } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "external_unlock_fetch_failed");
-    return [];
-  }
+export function normalizeCryptoRankUnlock(raw: CryptoRankUnlockRaw): ExternalUnlockEvent | null {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const symbol = toStr(raw.symbol, "");
+  if (!symbol) return null;
+
+  const unlockTs = parseUnlockTimestamp(raw);
+  if (unlockTs == null || unlockTs <= nowSec) return null;
+
+  const unlockPercent = Math.max(0, Math.min(100, toNum(raw.percent, 0)));
+  if (unlockPercent === 0) return null;
+
+  const chain = chainFromPlatform(raw.platform);
+  const unlockAmount = Math.max(0, toNum(raw.amount, 0));
+  const category = toCategory(raw.type);
+
+  return {
+    token_symbol: symbol,
+    chain,
+    unlock_timestamp: unlockTs,
+    unlock_amount: unlockAmount,
+    unlock_percent: unlockPercent,
+    category,
+    source: "cryptorank",
+    confidence: CRYPTORANK_CONFIDENCE,
+    inserted_at: nowSec,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Upsert
+// Fetch CryptoRank
+// ---------------------------------------------------------------------------
+
+const CRYPTORANK_UNLOCK_URL = "https://api.cryptorank.io/v1/unlock";
+
+/**
+ * Fetch unlock calendar from CryptoRank. Returns [] on missing key, non-200, or parse error.
+ */
+async function fetchCryptoRankUnlocks(apiKey: string): Promise<CryptoRankUnlockRaw[]> {
+  const url = `${CRYPTORANK_UNLOCK_URL}?api_key=${encodeURIComponent(apiKey)}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    logger.warn({ status: response.status, statusText: response.statusText }, "CryptoRank unlock API non-200");
+    return [];
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank unlock API JSON parse failed");
+    return [];
+  }
+  if (body == null || typeof body !== "object") return [];
+  const data = (body as Record<string, unknown>).data;
+  if (!Array.isArray(data)) return [];
+  return data as CryptoRankUnlockRaw[];
+}
+
+// ---------------------------------------------------------------------------
+// Upsert (BIGINT schema: migration_external_unlocks)
 // ---------------------------------------------------------------------------
 
 const UPSERT_SQL = `
 INSERT INTO unlock_events_external (
   token_symbol,
-  chain_id,
+  chain,
   unlock_timestamp,
-  amount,
+  unlock_amount,
   unlock_percent,
   category,
   source,
   confidence,
   inserted_at
-) VALUES ($1, $2, to_timestamp($3::double precision), $4, $5, $6, $7, $8, to_timestamp($9::double precision))
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (token_symbol, unlock_timestamp, source)
 DO UPDATE SET
-  amount = EXCLUDED.amount,
+  unlock_amount = EXCLUDED.unlock_amount,
   unlock_percent = EXCLUDED.unlock_percent,
-  category = EXCLUDED.category,
-  confidence = EXCLUDED.confidence,
-  updated_at = NOW()
+  confidence = EXCLUDED.confidence
 `;
 
 async function upsertOne(event: ExternalUnlockEvent): Promise<void> {
@@ -157,32 +240,35 @@ async function upsertOne(event: ExternalUnlockEvent): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Ingest external unlock schedules into unlock_events_external.
- * Fetches (mock) → normalizes → upserts. Safe for cron: logs errors and returns
- * without throwing. Does not hardcode tokens or dates.
+ * Ingest external unlock schedules from CryptoRank into unlock_events_external.
+ * Safe for cron: never throws; logs errors. Runs after DB connection is established.
  */
 export async function ingestExternalUnlocks(): Promise<void> {
   try {
-    const rawList = await fetchExternalUnlockData();
-    if (!Array.isArray(rawList) || rawList.length === 0) {
+    const apiKey = config.CRYPTORANK_API_KEY;
+    if (!apiKey) {
+      logger.warn("CRYPTORANK_API_KEY not configured. External unlock ingestion disabled.");
+      return;
+    }
+
+    const rawList = await fetchCryptoRankUnlocks(apiKey);
+    const totalFetched = Array.isArray(rawList) ? rawList.length : 0;
+    if (totalFetched === 0) {
       return;
     }
 
     const events: ExternalUnlockEvent[] = [];
     for (const raw of rawList) {
       if (raw == null || typeof raw !== "object") continue;
-      try {
-        const event = normalizeExternalUnlock(raw as RawExternalUnlock);
-        if (event.token_symbol === "UNKNOWN") continue;
-        events.push(event);
-      } catch (e) {
-        logger.warn({ err: e instanceof Error ? e.message : String(e) }, "external_unlock_normalize_skip");
-      }
+      const event = normalizeCryptoRankUnlock(raw as CryptoRankUnlockRaw);
+      if (event != null) events.push(event);
     }
 
+    let totalUpserted = 0;
     for (const event of events) {
       try {
         await upsertOne(event);
+        totalUpserted += 1;
       } catch (e) {
         logger.warn(
           { err: e instanceof Error ? e.message : String(e), token_symbol: event.token_symbol, source: event.source },
@@ -190,10 +276,12 @@ export async function ingestExternalUnlocks(): Promise<void> {
         );
       }
     }
-  } catch (err) {
-    logger.error(
-      { err: err instanceof Error ? err.message : String(err) },
-      "ingestExternalUnlocks failed (non-fatal)"
+
+    logger.info(
+      { totalFetched, totalInserted: totalUpserted, totalUpdated: 0 },
+      "CryptoRank unlock ingestion completed"
     );
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank ingestion failed");
   }
 }

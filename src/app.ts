@@ -17,6 +17,7 @@ import { requestIdMiddleware } from "./middleware/requestId.js";
 import { globalRateLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
+import { ingestExternalUnlocks } from "./ingestion/externalUnlockIngestion.js";
 import { runFullIngestionCycle } from "./orchestration/ingestionPipeline.js";
 import { runUnlockPrecompute } from "./broker.js";
 
@@ -81,6 +82,7 @@ let httpServer: HttpServer | null = null;
 const precomputeCron = cron.schedule("0 */6 * * *", () => {
   syncUnlockRegistryToDb()
     .then(() => runFullIngestionCycle(deps))
+    .then(() => ingestExternalUnlocks())
     .then(() => runUnlockPrecompute())
     .catch((err: Error) => {
       logger.error({ err, scope: "cron" }, "Ingestion cron error");
@@ -92,6 +94,7 @@ export function start(port: number): HttpServer {
     logger.info({ port }, "Server listening");
     syncUnlockRegistryToDb()
       .then(() => runFullIngestionCycle(deps))
+      .then(() => ingestExternalUnlocks())
       .then(() => runUnlockPrecompute())
       .catch((err: Error) => {
         logger.error({ err }, "Initial ingestion cycle error");

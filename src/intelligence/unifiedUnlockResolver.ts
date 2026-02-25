@@ -150,25 +150,20 @@ async function tryExternalCalendar(
 
   try {
     const sql = `
-      SELECT id, token_symbol, token_address, chain_id, amount,
-             EXTRACT(EPOCH FROM unlock_timestamp)::bigint AS unlock_ts_sec
+      SELECT id, token_symbol, chain AS chain_id, unlock_timestamp AS unlock_ts_sec, unlock_amount AS amount
       FROM ${EXTERNAL_TABLE}
-      WHERE COALESCE(chain_id, 'ethereum') = $2
-        AND (
-          ($1::text IS NOT NULL AND TRIM($1) != '' AND UPPER(TRIM(token_symbol)) = UPPER(TRIM($1)))
-          OR ($3::text IS NOT NULL AND TRIM($3) != '' AND LOWER(TRIM(COALESCE(token_address, ''))) = LOWER(TRIM($3)))
-        )
-        AND EXTRACT(EPOCH FROM unlock_timestamp) > $4
+      WHERE COALESCE(chain, 'ethereum') = $2
+        AND ($1::text IS NULL OR TRIM($1) = '' OR UPPER(TRIM(token_symbol)) = UPPER(TRIM($1)))
+        AND unlock_timestamp > $4
       ORDER BY unlock_timestamp ASC
       LIMIT 500
     `;
     const result = await query<{
-      id: string;
+      id: number | string;
       token_symbol: string | null;
-      token_address: string | null;
       chain_id: string | null;
-      amount: string | null;
       unlock_ts_sec: string | number | null;
+      amount: string | number | null;
     }>(sql, [tokenSymbol ?? null, norm, tokenAddress ?? null, nowSec]);
 
     const rows = result?.rows ?? [];
@@ -178,11 +173,10 @@ async function tryExternalCalendar(
         return Number.isFinite(sec) && sec > nowSec;
       })
       .map((r) => ({
-        id: r.id,
+        id: r.id != null ? String(r.id) : undefined,
         token_symbol: r.token_symbol ?? undefined,
-        token_address: r.token_address ?? undefined,
         unlock_timestamp: Math.floor(Number(r.unlock_ts_sec)),
-        amount: r.amount ?? undefined,
+        amount: r.amount != null ? String(r.amount) : undefined,
         chain_id: r.chain_id ?? undefined,
       }));
 
