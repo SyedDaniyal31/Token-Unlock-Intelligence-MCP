@@ -6,7 +6,6 @@
 
 import { query } from "../infrastructure/database/postgres.js";
 import logger from "../core/logger.js";
-import { config } from "../core/config.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -277,59 +276,10 @@ async function upsertOne(event: ExternalUnlockEvent): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Ingest external unlock schedules from CryptoRank into unlock_events_external.
- * Safe for cron: never throws; logs errors. Runs after DB connection is established.
+ * External unlock ingestion (CryptoRank) is disabled.
+ * unlock_events_external is still used by ManualRegistry for manual/DB-sourced data.
+ * No-op: never calls CryptoRank; safe to call from cron or admin routes.
  */
 export async function ingestExternalUnlocks(): Promise<void> {
-  console.log("=== INGEST FUNCTION ENTERED ===");
-  console.log("CRYPTORANK_API_KEY PRESENT:", !!process.env.CRYPTORANK_API_KEY);
-  try {
-    const apiKey = config.CRYPTORANK_API_KEY;
-    if (!apiKey) {
-      logger.warn("CRYPTORANK_API_KEY not configured. External unlock ingestion disabled.");
-      return;
-    }
-
-    const rawList = await fetchCryptoRankUnlocks(apiKey);
-    const totalFetched = Array.isArray(rawList) ? rawList.length : 0;
-    if (totalFetched === 0) {
-      return;
-    }
-
-    const events: ExternalUnlockEvent[] = [];
-    for (const raw of rawList) {
-      if (raw == null || typeof raw !== "object") continue;
-      const unlock = raw as CryptoRankUnlockRaw & { token_symbol?: string };
-      const hasSymbol = !!(unlock.symbol || unlock.token_symbol);
-      const hasDate = !!(unlock.date || unlock.unlock_date);
-      if (!hasSymbol || !hasDate) {
-        console.warn("Skipping invalid unlock record", unlock);
-        continue;
-      }
-      const event = normalizeCryptoRankUnlock(unlock);
-      if (event != null) events.push(event);
-    }
-
-    let totalUpserted = 0;
-    for (const event of events) {
-      try {
-        await upsertOne(event);
-        totalUpserted += 1;
-      } catch (e) {
-        logger.warn(
-          { err: e instanceof Error ? e.message : String(e), token_symbol: event.token_symbol, source: event.source },
-          "external_unlock_upsert_skip"
-        );
-      }
-    }
-
-    logger.info(
-      { totalFetched, totalInserted: totalUpserted, totalUpdated: 0 },
-      "CryptoRank unlock ingestion completed"
-    );
-    console.log("CryptoRank ingestion completed successfully");
-  } catch (err) {
-    console.error("CryptoRank ingestion error (full stack):", err instanceof Error ? err.stack : err);
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank ingestion failed");
-  }
+  // Phase 1A: CryptoRank ingestion removed. ManualRegistry + DefiLlama only.
 }

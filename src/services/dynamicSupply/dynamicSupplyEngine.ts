@@ -253,11 +253,29 @@ export async function runDynamicSupplyEngine(
   let unlockData: Awaited<ReturnType<typeof resolveUnlockData>> = { success: false, source: "none", events: [] };
 
   let supplyFromCache = false;
-  try {
-    if (getRpcUrl(chainKey) == null) {
-      throw new Error("RPC_FAILURE");
-    }
 
+  // Phase 1D: fetch block first, then memo check; on hit skip supply and unlock (1 RPC only).
+  if (getRpcUrl(chainKey) == null) {
+    throw new Error("RPC_FAILURE");
+  }
+  try {
+    blockNumberUsed = await getCurrentBlock(chainKey);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "Dynamic engine aborted") throw err;
+    logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+    return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, 0, 0, Math.floor(executionNowMs / 1000));
+  }
+  throwIfAborted(signal);
+
+  const memoKey = `${chainKey}:${addr.toLowerCase()}`;
+  const memoHit = blockNumberUsed > 0 ? getMemoizedResult(memoKey, blockNumberUsed) : null;
+  if (memoHit != null) {
+    logger.info({ token: input.symbol }, "INTELLIGENCE_MEMO_HIT");
+    return memoHit;
+  }
+
+  try {
     const inputTotalSupply = totalSupply;
     const supplyPromise = (async (): Promise<{ totalSupply: number; decimals: number; supplySnapshotTs: number; fromCache: boolean }> => {
       const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
@@ -281,20 +299,14 @@ export async function runDynamicSupplyEngine(
         fromCache: false,
       };
     })();
-    const blockPromise = getCurrentBlock(chainKey);
     const unlockPromise = resolveUnlockData(asset);
 
-    const [supplyResult, blockNumberUsedFromAll, unlockDataFromAll] = await Promise.all([
-      supplyPromise,
-      blockPromise,
-      unlockPromise,
-    ]);
+    const [supplyResult, unlockDataFromAll] = await Promise.all([supplyPromise, unlockPromise]);
 
     totalSupply = supplyResult.totalSupply;
     decimals = supplyResult.decimals;
     supplySnapshotTs = supplyResult.supplySnapshotTs;
     supplyFromCache = supplyResult.fromCache;
-    blockNumberUsed = blockNumberUsedFromAll;
     unlockData = unlockDataFromAll;
 
     throwIfAborted(signal);
@@ -309,7 +321,7 @@ export async function runDynamicSupplyEngine(
     if (msg === "RPC_FAILURE") throw err;
     if (msg === "Dynamic engine aborted") throw err;
     logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
-    return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, 0, 0, Math.floor(executionNowMs / 1000));
+    return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
   }
 
   throwIfAborted(signal);
@@ -323,18 +335,6 @@ export async function runDynamicSupplyEngine(
     const out = defaultOutput(1, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
     out.no_results_reason = "INVALID_SUPPLY";
     return out;
-  }
-
-  const memoKey = `${chainKey}:${addr.toLowerCase()}`;
-  if (blockNumberUsed > 0 && !unlockData.rate_limited) {
-    const memoHit = getMemoizedResult(memoKey, blockNumberUsed);
-    if (memoHit != null) {
-      logger.warn(
-        { token: input.symbol },
-        "INTELLIGENCE_MEMO_HIT"
-      );
-      return memoHit;
-    }
   }
 
   const supplySafe = Math.max(1, totalSupply);
