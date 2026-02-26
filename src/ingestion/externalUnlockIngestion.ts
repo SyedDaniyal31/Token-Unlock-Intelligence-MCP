@@ -44,7 +44,7 @@ export interface RawExternalUnlock {
   [key: string]: unknown;
 }
 
-/** CryptoRank API unlock item (e.g. from /v1/unlock). */
+/** CryptoRank V2 API unlock item (CurrenciesTokenUnlockResponse.data[]). */
 export interface CryptoRankUnlockRaw {
   symbol?: string;
   platform?: string;
@@ -157,7 +157,7 @@ export function normalizeCryptoRankUnlock(raw: CryptoRankUnlockRaw): ExternalUnl
   const category = toCategory(raw.type);
 
   return {
-    token_symbol: symbol,
+    token_symbol: symbol.toUpperCase(),
     chain,
     unlock_timestamp: unlockTs,
     unlock_amount: unlockAmount,
@@ -170,36 +170,61 @@ export function normalizeCryptoRankUnlock(raw: CryptoRankUnlockRaw): ExternalUnl
 }
 
 // ---------------------------------------------------------------------------
-// Fetch CryptoRank
+// Fetch CryptoRank (V2 API)
 // ---------------------------------------------------------------------------
 
-const CRYPTORANK_UNLOCK_URL = "https://api.cryptorank.io/v1/unlock";
+const CRYPTORANK_BASE_URL = "https://api.cryptorank.io/v2";
 
 /**
- * Fetch unlock calendar from CryptoRank. Returns [] on missing key, non-200, or parse error.
+ * Fetch token unlock calendar from CryptoRank V2 API.
+ * Uses X-Api-Key header (no query param). Returns [] on non-200 or parse error.
  */
 async function fetchCryptoRankUnlocks(apiKey: string): Promise<CryptoRankUnlockRaw[]> {
-  const url = `${CRYPTORANK_UNLOCK_URL}?api_key=${encodeURIComponent(apiKey)}`;
-  console.log("Calling CryptoRank API...");
-  const response = await fetch(url);
+  const url = `${CRYPTORANK_BASE_URL}/currencies/token-unlock`;
+  console.log("CRYPTO RANK URL:", url);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "X-Api-Key": apiKey,
+        "Content-Type": "application/json",
+      },
+    });
+  } catch (err) {
+    console.error("CryptoRank fetch error (full stack):", err instanceof Error ? err.stack : err);
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank fetch failed");
+    return [];
+  }
   console.log("CryptoRank response status:", response.status);
+  if (response.status === 404) {
+    const text = await response.text();
+    console.error("CryptoRank error body:", text);
+    console.error("CryptoRank endpoint invalid — check API version or path");
+    logger.warn({ status: 404 }, "CryptoRank unlock endpoint not found");
+    return [];
+  }
   if (!response.ok) {
     const text = await response.text();
-    console.log("CryptoRank non-200 response body:", text);
+    console.error("CryptoRank error body:", text);
     logger.warn({ status: response.status, statusText: response.statusText }, "CryptoRank unlock API non-200");
     return [];
   }
-  let body: unknown;
+  let json: { status?: { usedCredits?: number }; data?: unknown };
   try {
-    body = await response.json();
+    json = (await response.json()) as { status?: { usedCredits?: number }; data?: unknown };
   } catch (err) {
+    console.error("CryptoRank JSON parse error:", err instanceof Error ? err.stack : err);
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank unlock API JSON parse failed");
     return [];
   }
-  if (body == null || typeof body !== "object") return [];
-  const data = (body as Record<string, unknown>).data;
-  if (!Array.isArray(data)) return [];
-  return data as CryptoRankUnlockRaw[];
+  if (!json.data || !Array.isArray(json.data)) {
+    console.error("Unexpected CryptoRank response shape:", Object.keys(json));
+    return [];
+  }
+  const unlocks = json.data as CryptoRankUnlockRaw[];
+  console.log("CryptoRank records received:", unlocks.length);
+  return unlocks;
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +291,14 @@ export async function ingestExternalUnlocks(): Promise<void> {
     const events: ExternalUnlockEvent[] = [];
     for (const raw of rawList) {
       if (raw == null || typeof raw !== "object") continue;
-      const event = normalizeCryptoRankUnlock(raw as CryptoRankUnlockRaw);
+      const unlock = raw as CryptoRankUnlockRaw & { token_symbol?: string };
+      const hasSymbol = !!(unlock.symbol || unlock.token_symbol);
+      const hasDate = !!(unlock.date || unlock.unlock_date);
+      if (!hasSymbol || !hasDate) {
+        console.warn("Skipping invalid unlock record", unlock);
+        continue;
+      }
+      const event = normalizeCryptoRankUnlock(unlock);
       if (event != null) events.push(event);
     }
 
@@ -287,8 +319,9 @@ export async function ingestExternalUnlocks(): Promise<void> {
       { totalFetched, totalInserted: totalUpserted, totalUpdated: 0 },
       "CryptoRank unlock ingestion completed"
     );
+    console.log("CryptoRank ingestion completed successfully");
   } catch (err) {
-    console.error("CryptoRank ingestion error", err);
+    console.error("CryptoRank ingestion error (full stack):", err instanceof Error ? err.stack : err);
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "CryptoRank ingestion failed");
   }
 }
