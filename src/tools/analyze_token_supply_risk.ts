@@ -120,7 +120,7 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "unlock_only" | "combined" | "supply_only" | "insufficient";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
   /** Unlock provider name (e.g. CryptoRank, ManualRegistry). */

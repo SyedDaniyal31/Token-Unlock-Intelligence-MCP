@@ -94,7 +94,7 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "unlock_only" | "combined" | "supply_only" | "insufficient";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
   /** Unlock provider name (e.g. CryptoRank, ManualRegistry). */
   unlock_provider?: string;
   /** Unlock provider confidence 0–1. */
@@ -507,9 +507,7 @@ export async function runDynamicSupplyEngine(
   const { fused_volume_30d_usd, volume_source_consistency_score } = computeVolumeFusion(volumeSources);
   const volumeVariance = 1 - Math.min(100, Math.max(0, volume_source_consistency_score)) / 100;
   if (!Number.isFinite(inflation90d)) inflation90d = inflation30d * 3;
-  if (!unlock_data_available) {
-    supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
-  }
+  supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
   const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
 
   const unlockRiskScore: Tier | null = hasUnlockData ? (unlockPressureClassification as Tier) : null;
@@ -536,9 +534,7 @@ export async function runDynamicSupplyEngine(
     unlockPressureRatio: pressureRatioClean,
   });
 
-  if (!unlock_data_available) {
-    emissionAcceleration = computeEmissionAcceleration([]);
-  }
+  emissionAcceleration = computeEmissionAcceleration([]);
 
   let simulation_outcome: SimulationOutcome | null = null;
   if (input.simulation_params && Object.keys(input.simulation_params).length > 0) {
@@ -669,7 +665,7 @@ export async function runDynamicSupplyEngine(
     out.unlock_model = inferred.unlock_model;
     out.inference_source = inferred.inference_source;
     out.confidence_score = inferred.confidence_score;
-    out.analysis_scope = "dynamic_fallback";
+    out.analysis_scope = "technical_onchain";
     out.unlock_data_source = "inferred";
     out.unlock_provider = "none";
     out.unlock_provider_confidence = 0;
@@ -717,7 +713,7 @@ export async function runDynamicSupplyEngine(
       out.treasury_exposure_score = holderResult.treasury_exposure_score;
       out.combined_volatility_index = Math.min(100, Math.max(0, holderResult.combined_volatility_index));
       out.risk_flags = [...out.risk_flags, "HOLDER_CONCENTRATION_MODE"];
-      out.analysis_scope = "dynamic_fallback";
+      out.analysis_scope = "technical_onchain";
       out.analysis_provenance = {
         primary_model: "holder_distribution",
         fallback_used: true,
@@ -738,8 +734,7 @@ export async function runDynamicSupplyEngine(
     };
   }
 
-  // IMPORTANT: SSI must only reflect scheduled unlock pressure.
-  // Inferred distribution pressure is informational and must not inflate SSI.
+  // SSI: unlock contribution is 0 when unlock_pressure_ratio is 0 or unlock_provider_confidence is 0 (no calendar).
   const ssi = computeSupplyShockFusion({
     unlock_pressure_ratio: out.unlock_pressure_ratio,
     liquidity_stress_score: out.liquidity_stress_score,

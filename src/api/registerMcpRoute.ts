@@ -185,7 +185,7 @@ const MCP_TOOLS = [
         pattern_confidence_score: { type: "number" as const },
         analysis_scope: {
           type: "string" as const,
-          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "unlock_only", "combined", "supply_only", "insufficient"] as const,
+          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient"] as const,
           description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, or legacy dynamic/registry/hybrid.",
         },
         analysis_provenance: {
@@ -551,7 +551,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const patternConf = o.pattern_confidence_score;
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
-  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback";
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain";
   const provenance = o.analysis_provenance;
   const validProvenance =
     provenance == null ||
