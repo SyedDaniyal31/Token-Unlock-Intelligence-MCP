@@ -179,7 +179,11 @@ const MCP_TOOLS = [
         holder_data_confidence_score: { type: "number" as const },
         combined_volatility_index: { type: "number" as const },
         pattern_confidence_score: { type: "number" as const },
-        analysis_scope: { type: "string" as const, enum: ["dynamic", "registry", "hybrid", "dynamic_fallback"] as const },
+        analysis_scope: {
+          type: "string" as const,
+          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "unlock_only", "combined", "supply_only", "insufficient"] as const,
+          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, or legacy dynamic/registry/hybrid.",
+        },
         analysis_provenance: {
           type: "object" as const,
           description: "Intelligence provenance: which model produced the result and why.",
@@ -249,6 +253,14 @@ const MCP_TOOLS = [
           type: "string" as const,
           enum: ["registry", "external_calendar", "scanner", "inferred"] as const,
           description: "Unlock intelligence source: registry > external_calendar > scanner > inferred.",
+        },
+        unlock_provider: {
+          type: "string" as const,
+          description: "Unlock provider name (e.g. CryptoRank, ManualRegistry) when unlock data was used.",
+        },
+        unlock_provider_confidence: {
+          type: "number" as const,
+          description: "Unlock provider confidence 0–1; used to weight unlock in SSI.",
         },
         supply_shock_index: {
           type: "number" as const,

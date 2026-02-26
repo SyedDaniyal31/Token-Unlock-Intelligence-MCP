@@ -8,7 +8,7 @@ import { acquireDynamicEngineSlot } from "../../core/engineConcurrencyGuard.js";
 import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnalyzer.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
-import { resolveAsset } from "../../core/assetResolver.js";
+import { resolveAsset, type AssetMetadata } from "../../core/assetResolver.js";
 import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
@@ -181,6 +181,8 @@ export interface DynamicSupplyInput {
   simulation_params?: { price_shock_pct?: number; volume_shock_pct?: number; unlock_multiplier?: number };
   /** Frozen execution time (ms) for deterministic timestamps and windowing; omit to use current time. */
   executionNowMs?: number;
+  /** When provided, used as single source of truth; resolveAsset is skipped. */
+  asset?: AssetMetadata;
 }
 
 export interface RunDynamicSupplyEngineOptions {
@@ -209,7 +211,7 @@ export async function runDynamicSupplyEngine(
     ? input.token_address
     : "0x" + input.token_address;
 
-  const asset = await resolveAsset({
+  const asset: AssetMetadata = input.asset ?? await resolveAsset({
     symbol: input.symbol ?? "",
     token_address: addr,
     chain: input.chain,

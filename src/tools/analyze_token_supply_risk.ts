@@ -52,7 +52,7 @@ import {
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
 import { resolveAsset } from "../core/assetResolver.js";
-import { fetchOnchainData, fetchUnlockData } from "../core/dataFetchLayer.js";
+import { fetchUnlockData } from "../core/dataFetchLayer.js";
 import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
@@ -270,7 +270,7 @@ export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): Suppl
  */
 export function buildStructuredNoDataSupplyRisk(
   token_symbol: string,
-  analysisScope: "dynamic" | "registry" | "unlock_only",
+  analysisScope: "dynamic" | "registry" | "unlock_only" | "insufficient" | "combined" | "supply_only",
   no_results_reason: string,
   engine_latency_ms: number,
   analysisTimestamp: string,
@@ -282,13 +282,15 @@ export function buildStructuredNoDataSupplyRisk(
     no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET" ||
     no_results_reason === "native_non_evm_asset" ||
     no_results_reason === "UNTRACKED_NATIVE";
+  const riskTier =
+    analysisScope === "insufficient" ? "INSUFFICIENT_DATA" : isNativeUntracked ? "UNTRACKED_NATIVE" : "NO_DATA";
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
     result_integrity_hash: "",
     historical_depth_limited: true,
     risk_flags: ["NO_DATA"],
-    risk_tier: isNativeUntracked ? "UNTRACKED_NATIVE" : "NO_DATA",
+    risk_tier: riskTier,
     data_quality_score: 0,
     holder_data_confidence_score: 0,
     combined_volatility_index: 0,
@@ -305,7 +307,7 @@ export function buildStructuredNoDataSupplyRisk(
     no_results_reason,
     coverage: {
       registry_checked: analysisScope === "registry" || analysisScope === "unlock_only",
-      dynamic_checked: analysisScope === "dynamic",
+      dynamic_checked: analysisScope === "dynamic" || analysisScope === "insufficient" || analysisScope === "supply_only" || analysisScope === "combined",
       records_found: 0,
     },
     analysis_completion_status: "completed_no_data",
@@ -329,7 +331,13 @@ export function buildStructuredNoDataSupplyRisk(
  */
 function buildUnlockOnlySupplyRisk(
   token_symbol: string,
-  unlockData: { nextUnlockTimestamp?: number | null; unlockEvents?: { unlock_timestamp: number }[] | null; source?: string },
+  unlockData: {
+    nextUnlockTimestamp?: number | null;
+    unlockEvents?: { unlock_timestamp: number }[] | null;
+    source?: string;
+    unlock_provider?: string;
+    unlock_provider_confidence?: number;
+  },
   analysisTimestamp: string
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -359,6 +367,8 @@ function buildUnlockOnlySupplyRisk(
       confidence_basis: "unlock_events",
     },
     unlock_data_source: (unlockData.source as "registry" | "external_calendar" | "scanner" | "inferred") ?? "registry",
+    unlock_provider: unlockData.unlock_provider,
+    unlock_provider_confidence: unlockData.unlock_provider_confidence,
     search_exhausted: false,
     records_found: eventCount > 0 ? 1 : 0,
     no_results_reason: undefined,
@@ -438,11 +448,9 @@ export async function runAnalyzeTokenSupplyRisk(
     chain: chainSlug,
   });
 
-  // STEP 2 — Unlock data is chain-agnostic: always fetch for all assets.
-  const unlockData = await fetchUnlockData(asset);
-
-  // STEP 3 — Non-EVM path: skip RPC/explorer; use unlock data only if available.
+  // STEP 2 — Non-EVM path: unlock data only (no RPC). Fetch unlock here; engine not used.
   if (!asset.supported) {
+    const unlockData = await fetchUnlockData(asset);
     if (unlockData.success) {
       return {
         success: true,
@@ -466,24 +474,7 @@ export async function runAnalyzeTokenSupplyRisk(
   tokenAddress = asset.contract_address ?? tokenAddress;
   chainSlug = asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" ? asset.chain : undefined;
 
-  // STEP 4 — Data integrity: invalid contract (totalSupply <= 0) before analysis.
-  if (tokenAddress && chainSlug) {
-    const onchain = await fetchOnchainData(asset);
-    if (!onchain.success || (onchain.totalSupply != null && onchain.totalSupply <= 0)) {
-      return {
-        success: true,
-        data: buildStructuredNoDataSupplyRisk(
-          symbol || tokenAddress || "unknown",
-          "dynamic",
-          "invalid_contract",
-          0,
-          analysisTimestamp,
-          0
-        ),
-      };
-    }
-  }
-
+  // STEP 3 — Dynamic (EVM) path: engine runs Unlock → Onchain → Risk → Fusion; no duplicate fetch.
   if (tokenAddress && chainSlug) {
     logger.info({ token: symbol || tokenAddress, chain: chainSlug }, "DYNAMIC_PATH_EXECUTED");
     const engineStart = Date.now();
@@ -508,6 +499,7 @@ export async function runAnalyzeTokenSupplyRisk(
             volumeSources: volumeSources.length > 0 ? volumeSources : undefined,
             simulation_params: input.simulation_params,
             executionNowMs,
+            asset,
           },
           { signal: controller.signal }
         );
@@ -896,6 +888,8 @@ function mapRegistryResultToFlat(
       confidence_basis: "unlock_events",
     },
     unlock_data_source: "registry",
+    unlock_provider: "ManualRegistry",
+    unlock_provider_confidence: 0.9,
     supply_shock_index: ssi.supply_shock_index,
     supply_shock_risk_tier: ssi.supply_shock_risk_tier,
     cascade_risk_detected: ssi.cascade_risk_detected,

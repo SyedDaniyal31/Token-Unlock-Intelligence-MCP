@@ -23,6 +23,10 @@ export interface UnlockFetchResult {
   source?: "registry" | "external_calendar" | "scanner" | "inferred";
   unlockEvents?: { unlock_timestamp: number }[] | null;
   nextUnlockTimestamp?: number | null;
+  /** Raw provider name (e.g. CryptoRank, ManualRegistry). */
+  unlock_provider?: string;
+  /** Provider confidence 0–1. */
+  unlock_provider_confidence?: number;
 }
 
 /**
@@ -91,6 +95,8 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
       source,
       unlockEvents,
       nextUnlockTimestamp: result.next_unlock_timestamp ?? null,
+      unlock_provider: result.source === "none" ? undefined : result.source,
+      unlock_provider_confidence: result.confidence_score ?? 0,
     };
   } catch {
     return { success: false };
