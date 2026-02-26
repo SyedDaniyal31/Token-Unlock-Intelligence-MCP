@@ -68,6 +68,41 @@ export async function resolveAsset(input: {
     result = null;
   }
 
+  if (result == null && symbol) {
+    try {
+      const cgData = await resolveAssetIntelligence({
+        symbol,
+      });
+
+      if (cgData && cgData.chain_type === "evm") {
+        const supported =
+          cgData.chain !== "unsupported" &&
+          SUPPORTED_SET.has(cgData.chain);
+
+        return {
+          symbol: cgData.symbol,
+          chain_type: cgData.chain_type,
+          chain: cgData.chain,
+          contract_address: cgData.contract_address,
+          is_native_asset: false,
+          supported,
+          unresolved: false,
+        };
+      }
+    } catch {}
+
+    logger.warn({ symbol }, "ASSET_FALLBACK_TO_NON_EVM");
+    return {
+      symbol,
+      chain_type: "non_evm",
+      chain: "unsupported",
+      contract_address: null,
+      is_native_asset: true,
+      supported: false,
+      unresolved: true,
+    };
+  }
+
   if (result == null) {
     const resolved: AssetMetadata = {
       symbol: symbol || (input.symbol ?? "").trim(),
