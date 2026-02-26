@@ -82,7 +82,7 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
   try {
     const result = await resolveUnlockData(asset);
     const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
-      CryptoRank: "external_calendar",
+      Tokenomist: "external_calendar",
       ManualRegistry: "registry",
     };
     const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");

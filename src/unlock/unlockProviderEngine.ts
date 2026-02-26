@@ -1,15 +1,14 @@
 /**
  * Provider-based unlock engine: runs providers in order; first success with events wins.
- * Deterministic; safe fallback when no provider returns data.
- * Phase 1B: per-symbol (chain:symbol) in-memory cache, 90s TTL, to avoid redundant DefiLlama calls.
+ * Tokenomist Pro API is primary; ManualRegistry fallback. Deterministic; safe fallback when no data.
  */
 
 import type { AssetMetadata } from "../core/assetResolver.js";
 import type { UnlockFetchResult, UnlockProvider } from "./providers/UnlockProvider.js";
-import { defiLlamaProvider } from "./providers/DefiLlamaProvider.js";
+import { tokenomistProvider } from "./providers/TokenomistProvider.js";
 import { manualRegistryProvider } from "./providers/ManualRegistryProvider.js";
 
-const providers: UnlockProvider[] = [defiLlamaProvider, manualRegistryProvider];
+const providers: UnlockProvider[] = [tokenomistProvider, manualRegistryProvider];
 
 const UNLOCK_CACHE_TTL_MS = 90_000;
 const UNLOCK_CACHE_MAX_ENTRIES = 200;
