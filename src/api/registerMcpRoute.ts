@@ -260,7 +260,7 @@ const MCP_TOOLS = [
         },
         unlock_provider: {
           type: "string" as const,
-          description: "Unlock provider name (e.g. Tokenomist, ManualRegistry) when unlock data was used.",
+          description: "Unlock provider name (e.g. ManualRegistry, DefiLlama) when unlock data was used.",
         },
         unlock_provider_confidence: {
           type: "number" as const,

@@ -1,14 +1,15 @@
 /**
- * Provider-based unlock engine: runs providers in order; first success with events wins.
- * Tokenomist Pro API is primary; ManualRegistry fallback. Deterministic; safe fallback when no data.
+ * Provider-based unlock engine: ManualRegistry first (curated), then DefiLlama (free emissions).
+ * Deterministic; safe fallback when no data. Does not call DefiLlama when ManualRegistry returns events.
  */
 
 import type { AssetMetadata } from "../core/assetResolver.js";
 import type { UnlockFetchResult, UnlockProvider } from "./providers/UnlockProvider.js";
-import { tokenomistProvider } from "./providers/TokenomistProvider.js";
 import { manualRegistryProvider } from "./providers/ManualRegistryProvider.js";
+import { defiLlamaProvider } from "./providers/DefiLlamaProvider.js";
+import logger from "../core/logger.js";
 
-const providers: UnlockProvider[] = [tokenomistProvider, manualRegistryProvider];
+const providers: UnlockProvider[] = [manualRegistryProvider, defiLlamaProvider];
 
 const UNLOCK_CACHE_TTL_MS = 90_000;
 const UNLOCK_CACHE_MAX_ENTRIES = 200;
@@ -51,9 +52,8 @@ function filterFutureAndSort(events: UnlockFetchResult["events"], nowSec: number
 }
 
 /**
- * Resolve unlock data from the first provider that supports the asset and returns events.
- * Never throws; returns { success: false, source: "none", events: [], next_unlock_timestamp: null } when no data.
- * Uses in-memory cache (chain:symbol, 90s TTL) to avoid redundant provider calls within a short window.
+ * Resolve unlock data: ManualRegistry first; if it has events return immediately (no DefiLlama call).
+ * Otherwise try DefiLlama. Never throws.
  */
 export async function resolveUnlockData(asset: AssetMetadata): Promise<UnlockFetchResult> {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -73,6 +73,9 @@ export async function resolveUnlockData(asset: AssetMetadata): Promise<UnlockFet
       if (result.success && result.events.length > 0) {
         const future = filterFutureAndSort(result.events, nowSec);
         if (future.length === 0) continue;
+        if (result.source === "ManualRegistry") {
+          logger.info({ symbol: asset.symbol }, "MANUAL_REGISTRY_HIT");
+        }
         const out: UnlockFetchResult = {
           success: true,
           source: result.source,

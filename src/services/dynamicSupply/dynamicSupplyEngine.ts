@@ -101,7 +101,7 @@ export interface DynamicSupplyOutput {
   combined_volatility_index: number;
   pattern_confidence_score: number;
   analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
-  /** Unlock provider name (e.g. Tokenomist, ManualRegistry). */
+  /** Unlock provider name (e.g. ManualRegistry, DefiLlama). */
   unlock_provider?: string;
   /** Unlock provider confidence 0–1. */
   unlock_provider_confidence?: number;
@@ -384,14 +384,14 @@ export async function runDynamicSupplyEngine(
     unlockIntelSource =
       unlockData.source === "ManualRegistry"
         ? "registry"
-        : "external_calendar"; // Tokenomist and other calendar sources
+        : "external_calendar";
     unlockIntelEvents = unlockData.events.map((e) => ({
       unlock_timestamp: e.unlock_timestamp,
       amount: String(e.unlock_amount),
     }));
     nextUnlockTs = unlockData.next_unlock_timestamp ?? null;
   } else if (unlockData.rate_limited === true) {
-    providerUsed = unlockData.source ?? "Tokenomist";
+    providerUsed = unlockData.source ?? "DefiLlama";
   }
 
   if (unlockIntelEvents.length > 0) {

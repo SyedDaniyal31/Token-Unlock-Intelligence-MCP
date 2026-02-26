@@ -1,6 +1,6 @@
 /**
  * Asset Resolution Layer (mandatory first step).
- * Classifies token before any RPC or unlock API. No RPC/CryptoRank calls inside.
+ * Classifies token before any RPC or unlock API. No RPC or unlock API calls inside.
  */
 
 import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
@@ -43,7 +43,7 @@ function dataSourcesForEvm(chain: ChainSlug): DataSourcesAvailable {
 /**
  * Resolve and classify asset from symbol (and optional address/chain).
  * Returns null on hard failure (e.g. no CoinGecko id and no registry match).
- * No RPC or CryptoRank calls.
+ * No RPC or unlock API calls.
  */
 export async function resolveAsset(input: {
   symbol: string;

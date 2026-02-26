@@ -39,9 +39,4 @@ export const config = {
     const v = getEnv("CRYPTORANK_API_KEY");
     return v && String(v).trim() ? String(v).trim() : null;
   },
-  /** Tokenomist Pro API key for unlock/emission calendar. Primary unlock provider when set. */
-  get TOKENOMIST_API_KEY(): string | null {
-    const v = getEnv("TOKENOMIST_API_KEY");
-    return v && String(v).trim() ? String(v).trim() : null;
-  },
 } as const;

@@ -23,7 +23,7 @@ export interface UnlockFetchResult {
   source?: "registry" | "external_calendar" | "scanner" | "inferred";
   unlockEvents?: { unlock_timestamp: number }[] | null;
   nextUnlockTimestamp?: number | null;
-  /** Raw provider name (e.g. CryptoRank, ManualRegistry). */
+  /** Raw provider name (e.g. ManualRegistry, DefiLlama). */
   unlock_provider?: string;
   /** Provider confidence 0–1. */
   unlock_provider_confidence?: number;
@@ -82,8 +82,8 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
   try {
     const result = await resolveUnlockData(asset);
     const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
-      Tokenomist: "external_calendar",
       ManualRegistry: "registry",
+      DefiLlama: "external_calendar",
     };
     const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");
     const unlockEvents =

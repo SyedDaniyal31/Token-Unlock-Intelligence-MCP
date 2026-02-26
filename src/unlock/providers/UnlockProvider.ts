@@ -23,7 +23,7 @@ export interface UnlockFetchResult {
   error?: string;
   /** True when provider returned HTTP 429 (rate limited). */
   rate_limited?: boolean;
-  /** Optional: daily emission series (e.g. Tokenomist). For future emission modeling only. */
+  /** Optional: daily emission series. For future emission modeling only. */
   daily_emission_series?: number[];
   next_30d_emission_total?: number;
   next_90d_emission_total?: number;
