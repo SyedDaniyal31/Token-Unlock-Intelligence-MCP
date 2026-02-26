@@ -715,14 +715,36 @@ async function handleAnalyzeTokenUnlock(
     logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: CoinGecko/dynamic fallback failed");
   }
 
-  logger.error(
-    {
-      symbol: symbolToResolve,
-      hasCgData: !!cgData,
-      hasAddress: !!cgData?.address,
-      platform_chain: cgData?.platform_chain ?? null,
-    },
-    "UNLOCK_TOKEN_NOT_SUPPORTED"
+  const hasCgData = !!cgData;
+  const hasAddress = !!(cgData?.address);
+  const platformChain = cgData?.platform_chain ?? null;
+  if (!hasCgData && !hasAddress && platformChain === null) {
+    logger.warn(
+      { symbol: symbolToResolve },
+      "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"
+    );
+    logger.info(
+      {
+        symbol: symbolToResolve,
+        supported: false,
+        classification: "NATIVE_CHAIN_ASSET",
+      },
+      "Unlock: native chain asset (non-EVM)"
+    );
+    return jsonRpcSuccess(id, {
+      supported: false,
+      classification: "NATIVE_CHAIN_ASSET",
+      chain_type: "non_evm",
+      message: "Token is native to a non-EVM chain. Unlock schedules must be sourced from protocol documentation.",
+      unlock_pressure_ratio: 0,
+      volume_impact_ratio: 0,
+      supply_inflation_percent: 0,
+      risk_score: 0,
+    });
+  }
+  logger.warn(
+    { symbol: symbolToResolve, hasCgData, hasAddress, platform_chain: platformChain },
+    "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"
   );
   return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
 }

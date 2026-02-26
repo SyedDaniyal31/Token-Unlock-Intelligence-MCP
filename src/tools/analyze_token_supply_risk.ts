@@ -273,13 +273,14 @@ export function buildStructuredNoDataSupplyRisk(
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
   const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
+  const isNativeUntracked = no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET";
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
     result_integrity_hash: "",
     historical_depth_limited: true,
     risk_flags: ["NO_DATA"],
-    risk_tier: "NO_DATA",
+    risk_tier: isNativeUntracked ? "UNTRACKED_NATIVE" : "NO_DATA",
     data_quality_score: 0,
     holder_data_confidence_score: 0,
     combined_volatility_index: 0,
@@ -300,7 +301,7 @@ export function buildStructuredNoDataSupplyRisk(
       records_found: 0,
     },
     analysis_completion_status: "completed_no_data",
-    data_availability_status: "completed_no_data",
+    data_availability_status: isNativeUntracked ? "native_chain_untracked" : "completed_no_data",
     unlock_schedule_status: "completed",
     analysis_timestamp: analysisTimestamp,
     engine_version: ENGINE_VERSION,
