@@ -123,7 +123,7 @@ export interface SupplyRiskOutputFlat {
   analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
-  /** Unlock provider name (e.g. ManualRegistry, DefiLlama). */
+  /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
   unlock_provider?: string;
   /** Unlock provider confidence 0–1. */
   unlock_provider_confidence?: number;

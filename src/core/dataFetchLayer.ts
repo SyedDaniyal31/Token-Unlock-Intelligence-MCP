@@ -83,6 +83,7 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
     const result = await resolveUnlockData(asset);
     const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
       ManualRegistry: "registry",
+      Mobula: "external_calendar",
       DefiLlama: "external_calendar",
     };
     const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");

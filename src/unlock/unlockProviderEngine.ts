@@ -1,15 +1,16 @@
 /**
- * Provider-based unlock engine: ManualRegistry first (curated), then DefiLlama (free emissions).
- * Deterministic; safe fallback when no data. Does not call DefiLlama when ManualRegistry returns events.
+ * Provider-based unlock engine: ManualRegistry first, then Mobula, then DefiLlama.
+ * Stops at first provider that returns events. Deterministic; safe fallback when no data.
  */
 
 import type { AssetMetadata } from "../core/assetResolver.js";
 import type { UnlockFetchResult, UnlockProvider } from "./providers/UnlockProvider.js";
 import { manualRegistryProvider } from "./providers/ManualRegistryProvider.js";
+import { mobulaProvider } from "./providers/MobulaProvider.js";
 import { defiLlamaProvider } from "./providers/DefiLlamaProvider.js";
 import logger from "../core/logger.js";
 
-const providers: UnlockProvider[] = [manualRegistryProvider, defiLlamaProvider];
+const providers: UnlockProvider[] = [manualRegistryProvider, mobulaProvider, defiLlamaProvider];
 
 const UNLOCK_CACHE_TTL_MS = 90_000;
 const UNLOCK_CACHE_MAX_ENTRIES = 200;
@@ -52,8 +53,8 @@ function filterFutureAndSort(events: UnlockFetchResult["events"], nowSec: number
 }
 
 /**
- * Resolve unlock data: ManualRegistry first; if it has events return immediately (no DefiLlama call).
- * Otherwise try DefiLlama. Never throws.
+ * Resolve unlock data: ManualRegistry first; if it has events return (no Mobula/DefiLlama).
+ * Else Mobula; if it has events return (no DefiLlama). Else DefiLlama. Never throws.
  */
 export async function resolveUnlockData(asset: AssetMetadata): Promise<UnlockFetchResult> {
   const nowSec = Math.floor(Date.now() / 1000);

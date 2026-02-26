@@ -39,4 +39,9 @@ export const config = {
     const v = getEnv("CRYPTORANK_API_KEY");
     return v && String(v).trim() ? String(v).trim() : null;
   },
+  /** Mobula API key for metadata/release_schedule. Optional in dev; required in prod for Mobula provider. */
+  get MOBULA_API_KEY(): string | null {
+    const v = getEnv("MOBULA_API_KEY");
+    return v && String(v).trim() ? String(v).trim() : null;
+  },
 } as const;
