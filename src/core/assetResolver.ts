@@ -17,6 +17,8 @@ export interface AssetMetadata {
   is_native_asset: boolean;
   /** True when chain_type === "evm" and chain is ethereum | bsc | arbitrum. */
   supported: boolean;
+  /** True when intelligence returned null (symbol not in CoinGecko/registry/KNOWN_EVM). Distinguishes "unresolved" from "resolved native". */
+  unresolved?: boolean;
 }
 
 const SUPPORTED_CHAINS: ChainSlug[] = ["ethereum", "bsc", "arbitrum"];
@@ -74,6 +76,7 @@ export async function resolveAsset(input: {
       contract_address: null,
       is_native_asset: true,
       supported: false,
+      unresolved: true,
     };
     logger.info(
       { symbol: resolved.symbol, chain_type: resolved.chain_type, chain: resolved.chain, supported: resolved.supported },
@@ -91,6 +94,7 @@ export async function resolveAsset(input: {
     contract_address: result.contract_address,
     is_native_asset: result.is_native_asset,
     supported,
+    unresolved: false,
   };
   logger.info(
     { symbol: resolved.symbol, chain_type: resolved.chain_type, chain: resolved.chain, supported: resolved.supported },

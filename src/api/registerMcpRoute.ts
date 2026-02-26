@@ -18,6 +18,7 @@ import {
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
 import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
+import { resolveAsset } from "../core/assetResolver.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -742,6 +743,47 @@ async function handleAnalyzeTokenUnlock(
   const hasAddress = !!(cgData?.address);
   const platformChain = cgData?.platform_chain ?? null;
   if (!hasCgData && !hasAddress && platformChain === null) {
+    const asset = await resolveAsset({ symbol: symbolToResolve });
+    if (asset.supported && asset.contract_address && (asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum")) {
+      try {
+        const supplyResult = await Promise.race([
+          runAnalyzeTokenSupplyRisk(
+            { token_symbol: symbolToResolve, token_address: asset.contract_address, chain: asset.chain },
+            deps
+          ),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+          ),
+        ]);
+        if (supplyResult.success && supplyResult.data) {
+          const report = supplyRiskToUnlockReport(supplyResult.data);
+          const result = toUnlockResult(report);
+          if (!isValidUnlockResult(result)) {
+            return jsonRpcError(id, -32603, "Internal result validation failed.");
+          }
+          logger.info(
+            { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "resolveAsset" },
+            "MCP callTool success (resolveAsset fallback)"
+          );
+          return jsonRpcSuccess(id, result);
+        }
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: resolveAsset supply risk fallback failed");
+      }
+    }
+    if (asset.unresolved) {
+      logger.info({ symbol: symbolToResolve, classification: "NO_SCHEDULED_DATA" }, "Unlock: unresolved asset, no scheduled data");
+      return jsonRpcSuccess(id, {
+        supported: false,
+        classification: "NO_SCHEDULED_DATA",
+        chain_type: "non_evm",
+        message: "No unlock data found for this token. It was not found in CoinGecko, the unlock registry, or known EVM symbols. Provide token_address and chain for EVM tokens when available.",
+        unlock_pressure_ratio: 0,
+        volume_impact_ratio: 0,
+        supply_inflation_percent: 0,
+        risk_score: 0,
+      });
+    }
     logger.warn(
       { symbol: symbolToResolve },
       "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"

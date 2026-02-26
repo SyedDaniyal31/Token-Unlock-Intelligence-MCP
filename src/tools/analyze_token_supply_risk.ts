@@ -457,12 +457,13 @@ export async function runAnalyzeTokenSupplyRisk(
         data: buildUnlockOnlySupplyRisk(asset.symbol, unlockData, analysisTimestamp),
       };
     }
+    const noDataReason = asset.unresolved === true ? "NO_SCHEDULED_DATA" : "UNTRACKED_NATIVE";
     return {
       success: true,
       data: buildStructuredNoDataSupplyRisk(
         asset.symbol,
         "unlock_only",
-        "UNTRACKED_NATIVE",
+        noDataReason,
         0,
         analysisTimestamp,
         0
