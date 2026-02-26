@@ -29,6 +29,8 @@ export async function resolveUnlockData(asset: AssetMetadata): Promise<UnlockFet
 
       const result = await provider.fetchUnlocks(asset);
 
+      if (result.rate_limited === true) return result;
+
       if (result.success && result.events.length > 0) {
         const future = filterFutureAndSort(result.events, nowSec);
         if (future.length === 0) continue;

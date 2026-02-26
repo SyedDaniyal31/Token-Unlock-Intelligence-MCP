@@ -21,6 +21,8 @@ export interface UnlockFetchResult {
   /** Provider confidence 0–1; used to weight unlock in SSI. */
   confidence_score?: number;
   error?: string;
+  /** True when provider returned HTTP 429 (rate limited). */
+  rate_limited?: boolean;
 }
 
 export interface UnlockProvider {

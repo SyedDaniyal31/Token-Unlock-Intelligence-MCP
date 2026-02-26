@@ -149,6 +149,18 @@ export class DefiLlamaProvider implements UnlockProvider {
         };
       }
 
+      if (response.status === 429) {
+        const retryAfter = response.headers.get("Retry-After") ?? undefined;
+        logger.warn({ slug, retryAfter }, "DEFILLAMA_RATE_LIMITED");
+        return {
+          success: false,
+          source: "DefiLlama",
+          events: [],
+          error: "rate_limited",
+          rate_limited: true,
+        };
+      }
+
       if (!response.ok) {
         logger.warn({ slug, status: response.status }, "DEFILLAMA_FETCH_FAILED");
         return {

@@ -2,6 +2,12 @@
  * Dynamic token supply risk engine: works for any ERC-20/BEP-20 without static registry.
  * Includes quantitative analytics: uncertainty, volume fusion, concentration, depth, emission momentum, optional shock simulation.
  *
+ * Scoring Philosophy:
+ * This engine is unlock-provider independent.
+ * Scheduled unlock data is optional and never penalizes
+ * confidence_score, data_quality_score, or risk tier.
+ * All scoring is derived from on-chain technical metrics.
+ *
  * Unlock Pressure Separation Model
  *
  * unlock_pressure_ratio:
@@ -99,6 +105,8 @@ export interface DynamicSupplyOutput {
   unlock_provider?: string;
   /** Unlock provider confidence 0–1. */
   unlock_provider_confidence?: number;
+  /** Set when unlock provider returned 429 (e.g. provider_rate_limited). */
+  data_availability_status?: string;
   analysis_provenance: {
     primary_model: "registry" | "dynamic_unlock" | "holder_distribution";
     fallback_used: boolean;
@@ -318,7 +326,7 @@ export async function runDynamicSupplyEngine(
   }
 
   const memoKey = `${chainKey}:${addr.toLowerCase()}`;
-  if (blockNumberUsed > 0) {
+  if (blockNumberUsed > 0 && !unlockData.rate_limited) {
     const memoHit = getMemoizedResult(memoKey, blockNumberUsed);
     if (memoHit != null) {
       logger.warn(
@@ -382,6 +390,8 @@ export async function runDynamicSupplyEngine(
       amount: String(e.unlock_amount),
     }));
     nextUnlockTs = unlockData.next_unlock_timestamp ?? null;
+  } else if (unlockData.rate_limited === true) {
+    providerUsed = unlockData.source ?? "DefiLlama";
   }
 
   if (unlockIntelEvents.length > 0) {
@@ -641,11 +651,19 @@ export async function runDynamicSupplyEngine(
   out.unlock_data_source = unlockIntelSource;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
   out.unlock_provider = providerUsed;
-  out.unlock_provider_confidence =
-    providerUsed === "none" ? 0 : (typeof unlockData.confidence_score === "number" ? unlockData.confidence_score : 0);
+  out.unlock_provider_confidence = unlockData.rate_limited
+    ? 0
+    : providerUsed === "none"
+      ? 0
+      : typeof unlockData.confidence_score === "number"
+        ? unlockData.confidence_score
+        : 0;
   out.analysis_provenance.unlock_data_available = unlock_data_available;
+  if (unlockData.rate_limited === true) {
+    out.data_availability_status = "provider_rate_limited";
+  }
 
-  if (shouldApplySupplyShockInference(unlock_data_available)) {
+  if (shouldApplySupplyShockInference(unlock_data_available) && !unlockData.rate_limited) {
     const inferred = inferSupplyShockUnlock({
       inflation_rate_30d: out.inflation_rate_30d,
       supply_volatility_index: out.supply_volatility_index,
@@ -734,7 +752,8 @@ export async function runDynamicSupplyEngine(
     };
   }
 
-  // SSI: unlock contribution is 0 when unlock_pressure_ratio is 0 or unlock_provider_confidence is 0 (no calendar).
+  // IMPORTANT: SSI must only reflect scheduled unlock pressure. Unlock term is 0 when ratio is 0 or provider confidence is 0.
+  // Inferred distribution pressure is informational and must not inflate SSI.
   const ssi = computeSupplyShockFusion({
     unlock_pressure_ratio: out.unlock_pressure_ratio,
     liquidity_stress_score: out.liquidity_stress_score,

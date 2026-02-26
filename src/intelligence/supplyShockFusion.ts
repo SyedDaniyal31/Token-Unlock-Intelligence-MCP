@@ -45,6 +45,8 @@ const BASE_UNLOCK_WEIGHT = 0.35;
  * Compute Supply Shock Fusion Index (SSI) from normalized inputs.
  * Weights: unlock 0.35 (× unlock_provider_confidence ?? 1), liquidity 0.25, volatility 0.20, inflation 0.20.
  * Adjusted by confidence; scaled to 0–100.
+ * Unlock contribution is 0 when unlock_pressure_ratio is 0 or unlock_provider_confidence is 0 (no calendar).
+ * No penalty or negative weight is applied when unlock provider is absent.
  */
 export function computeSupplyShockFusion(input: SupplyShockFusionInput): SupplyShockFusionOutput {
   const unlockNorm = normalize01(input.unlock_pressure_ratio, 2);
