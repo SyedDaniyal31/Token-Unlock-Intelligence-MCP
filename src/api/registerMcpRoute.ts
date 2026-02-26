@@ -83,7 +83,7 @@ const MCP_TOOLS = [
   {
     name: SUPPLY_RISK_TOOL_NAME,
     description:
-      "Multi-chain token supply risk engine: historical unlocks, vesting cliffs, emission patterns, liquidity stress for Ethereum, Arbitrum, BSC.",
+      "Multi-chain token supply risk engine: historical unlocks, vesting cliffs, emission patterns, liquidity stress for Ethereum, Arbitrum, BSC. For any token on Ethereum, BSC, or Arbitrum, providing token_address (contract address) and chain ensures correct EVM classification and full analysis (onchain, unlock, risk, SSI).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -101,7 +101,7 @@ const MCP_TOOLS = [
         },
       },
       required: [] as const,
-      description: "Provide token_symbol for registry analysis, or token_address + chain for dynamic analysis. At least one of (token_symbol) or (token_address and chain) is required.",
+      description: "Provide token_address + chain for any EVM token (recommended: ensures correct classification). Symbol-only resolution uses CoinGecko and internal registry; for tokens not listed there, provide token_address and chain when available. At least one of (token_symbol) or (token_address and chain) is required.",
     },
     outputSchema: {
       type: "object" as const,
