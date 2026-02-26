@@ -1,5 +1,5 @@
 -- External unlock calendar: third-party schedules (TokenUnlocks / CryptoRank etc.).
--- Consumed by unifiedUnlockResolver and externalUnlockIngestion.
+-- Consumed by externalUnlockIngestion and ManualRegistry unlock provider.
 
 CREATE TABLE IF NOT EXISTS unlock_events_external (
     id SERIAL PRIMARY KEY,

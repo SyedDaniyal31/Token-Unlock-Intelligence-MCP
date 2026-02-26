@@ -5,9 +5,9 @@
 
 import logger from "./logger.js";
 
-export const MAX_DYNAMIC_ENGINE_CONCURRENCY = 2;
+export const MAX_DYNAMIC_ENGINE_CONCURRENCY = 4;
 
-const WAIT_TIMEOUT_MS = 1500;
+const WAIT_TIMEOUT_MS = 500;
 
 let activeDynamicEngines = 0;
 let waiterSeq = 0;

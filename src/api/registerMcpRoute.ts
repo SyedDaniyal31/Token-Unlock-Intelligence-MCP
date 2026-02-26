@@ -836,20 +836,6 @@ async function handleAnalyzeTokenSupplyRisk(
     if (typeof s.unlock_multiplier === "number" && Number.isFinite(s.unlock_multiplier)) simulation_params.unlock_multiplier = s.unlock_multiplier;
   }
 
-  // Symbol-only upgrade: try CoinGecko resolution → dynamic engine; fallback to registry
-  if (token && !tokenAddress) {
-    try {
-      const cgData = await fetchCoinGeckoData(token);
-      if (cgData?.address && cgData?.platform_chain) {
-        tokenAddress = cgData.address;
-        const slug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
-        if (slug) chainSlug = slug;
-      }
-    } catch {
-      // Silent fail — fallback to registry (tokenAddress and chainSlug remain undefined)
-    }
-  }
-
   try {
     let result = await Promise.race([
       runAnalyzeTokenSupplyRisk(

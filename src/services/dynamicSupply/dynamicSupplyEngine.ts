@@ -242,6 +242,7 @@ export async function runDynamicSupplyEngine(
   let supplySnapshotTs = Math.floor(executionNowMs / 1000);
   let blockNumberUsed = 0;
   let blockTimestampUsed = 0;
+  let unlockData: Awaited<ReturnType<typeof resolveUnlockData>> = { success: false, source: "none", events: [] };
 
   let supplyFromCache = false;
   try {
@@ -249,35 +250,52 @@ export async function runDynamicSupplyEngine(
       throw new Error("RPC_FAILURE");
     }
 
-    const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
-    if (cachedEntry && cachedEntry.data.totalSupply >= 0) {
-      supplyFromCache = true;
-      totalSupply = totalSupply || cachedEntry.data.totalSupply;
-      decimals = cachedEntry.data.decimals;
-      supplySnapshotTs = cachedEntry.timestamp;
-      logger.info({ ms: 0, cached: true }, "STAGE_RPC_SUPPLY_DONE");
-    } else {
+    const inputTotalSupply = totalSupply;
+    const supplyPromise = (async (): Promise<{ totalSupply: number; decimals: number; supplySnapshotTs: number; fromCache: boolean }> => {
+      const cachedEntry = getSupplyFromCacheWithTimestamp(addr, chainKey);
+      if (cachedEntry && cachedEntry.data.totalSupply >= 0) {
+        logger.info({ ms: 0, cached: true }, "STAGE_RPC_SUPPLY_DONE");
+        return {
+          totalSupply: inputTotalSupply || cachedEntry.data.totalSupply,
+          decimals: cachedEntry.data.decimals,
+          supplySnapshotTs: cachedEntry.timestamp,
+          fromCache: true,
+        };
+      }
       const tRpcSupplyStart = Date.now();
       const snapshot = await readErc20SupplyFromRpc(chainKey, addr);
       logger.info({ ms: Date.now() - tRpcSupplyStart }, "STAGE_RPC_SUPPLY_DONE");
-      throwIfAborted(signal);
-      totalSupply = totalSupply || snapshot.totalSupply;
-      decimals = snapshot.decimals;
       setSupplyInCache(addr, chainKey, snapshot);
-    }
+      return {
+        totalSupply: inputTotalSupply || snapshot.totalSupply,
+        decimals: snapshot.decimals,
+        supplySnapshotTs: Math.floor(Date.now() / 1000),
+        fromCache: false,
+      };
+    })();
+    const blockPromise = getCurrentBlock(chainKey);
+    const unlockPromise = resolveUnlockData(asset);
 
-    if (Date.now() < deadline) {
-      const tBlockStart = Date.now();
-      blockNumberUsed = await getCurrentBlock(chainKey);
-      logger.info({ ms: Date.now() - tBlockStart }, "STAGE_GET_CURRENT_BLOCK_DONE");
-      throwIfAborted(signal);
-      if (blockNumberUsed > 0) {
-        const tBlockTsStart = Date.now();
-        blockTimestampUsed = await getBlockTimestamp(chainKey, blockNumberUsed);
-        logger.info({ ms: Date.now() - tBlockTsStart }, "STAGE_GET_BLOCK_TIMESTAMP_DONE");
-      }
-      throwIfAborted(signal);
+    const [supplyResult, blockNumberUsedFromAll, unlockDataFromAll] = await Promise.all([
+      supplyPromise,
+      blockPromise,
+      unlockPromise,
+    ]);
+
+    totalSupply = supplyResult.totalSupply;
+    decimals = supplyResult.decimals;
+    supplySnapshotTs = supplyResult.supplySnapshotTs;
+    supplyFromCache = supplyResult.fromCache;
+    blockNumberUsed = blockNumberUsedFromAll;
+    unlockData = unlockDataFromAll;
+
+    throwIfAborted(signal);
+    if (blockNumberUsed > 0) {
+      const tBlockTsStart = Date.now();
+      blockTimestampUsed = await getBlockTimestamp(chainKey, blockNumberUsed);
+      logger.info({ ms: Date.now() - tBlockTsStart }, "STAGE_GET_BLOCK_TIMESTAMP_DONE");
     }
+    throwIfAborted(signal);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (msg === "RPC_FAILURE") throw err;
@@ -342,13 +360,10 @@ export async function runDynamicSupplyEngine(
   }
   throwIfAborted(signal);
 
-  // Provider engine: DefiLlama → ManualRegistry (single unlock source for dynamic EVM path).
-  const tUnlockStart = Date.now();
-  const unlockData = await resolveUnlockData(asset);
   if (!unlockData.success) {
     logger.info({ symbol: asset.symbol }, "UNLOCK_PROVIDER_NO_DATA");
   }
-  logger.info({ ms: Date.now() - tUnlockStart, source: unlockData.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
+  logger.info({ source: unlockData.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
 
   let unlockIntelSource: "registry" | "external_calendar" | "scanner" | "inferred" = "inferred";

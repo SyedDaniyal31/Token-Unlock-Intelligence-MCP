@@ -123,10 +123,22 @@ export class DefiLlamaProvider implements UnlockProvider {
 
     logger.info({ slug }, "DEFILLAMA_FETCH_START");
 
-    try {
-      const url = `${DEFILLAMA_EMISSIONS_BASE}/${encodeURIComponent(slug)}`;
-      const response = await fetch(url);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
 
+    let response: Response;
+    try {
+      response = await fetch(`${DEFILLAMA_EMISSIONS_BASE}/${encodeURIComponent(slug)}`, {
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      logger.warn({ slug }, "DEFILLAMA_FETCH_TIMEOUT_OR_ERROR");
+      return { success: false, source: "DefiLlama", events: [] };
+    }
+    clearTimeout(timeout);
+
+    try {
       if (response.status === 404) {
         logger.warn({ symbol: asset.symbol }, "DEFILLAMA_PROVIDER_NO_DATA");
         return {

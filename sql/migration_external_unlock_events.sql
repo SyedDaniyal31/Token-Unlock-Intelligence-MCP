@@ -1,5 +1,5 @@
 -- External unlock calendar: TokenUnlocks / CryptoRank / other third-party schedules.
--- Used by externalUnlockIngestion and unifiedUnlockResolver. Run after base schema.
+-- Used by externalUnlockIngestion and ManualRegistry unlock provider. Run after base schema.
 
 CREATE TABLE IF NOT EXISTS unlock_events_external (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),

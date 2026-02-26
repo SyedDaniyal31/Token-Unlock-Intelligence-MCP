@@ -475,18 +475,11 @@ export async function runAnalyzeTokenSupplyRisk(
   tokenAddress = asset.contract_address ?? tokenAddress;
   chainSlug = asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" ? asset.chain : undefined;
 
-  // STEP 3 — Dynamic (EVM) path: engine runs Unlock → Onchain → Risk → Fusion; no duplicate fetch.
+  // STEP 3 — Dynamic (EVM) path: engine runs Unlock → Onchain → Risk → Fusion; enrichment handled inside engine.
   if (tokenAddress && chainSlug) {
     logger.info({ token: symbol || tokenAddress, chain: chainSlug }, "DYNAMIC_PATH_EXECUTED");
     const engineStart = Date.now();
     try {
-      let volume30dUsd = 0;
-      const volumeSources: number[] = [];
-      if (symbol) {
-        const market = await getMarketData(symbol, undefined, undefined);
-        volume30dUsd = market.volume24h * 0.85;
-        if (market.volume24h > 0) volumeSources.push(volume30dUsd);
-      }
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), DYNAMIC_ENGINE_TIMEOUT_MS);
       let result: Awaited<ReturnType<typeof runDynamicSupplyEngine>>;
@@ -496,8 +489,8 @@ export async function runAnalyzeTokenSupplyRisk(
             token_address: tokenAddress,
             chain: chainSlug,
             symbol: symbol || undefined,
-            volume30dUsd,
-            volumeSources: volumeSources.length > 0 ? volumeSources : undefined,
+            volume30dUsd: 0,
+            volumeSources: undefined,
             simulation_params: input.simulation_params,
             executionNowMs,
             asset,
