@@ -729,7 +729,7 @@ export async function runDynamicSupplyEngine(
   if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
 
   // When scheduled unlock exists, inferred fields must not appear (mutual exclusivity).
-  if (out.unlock_data_available && out.inferred_distribution_pressure != null) {
+  if (out.analysis_provenance.unlock_data_available && out.inferred_distribution_pressure != null) {
     delete out.inferred_distribution_pressure;
     delete out.inferred_distribution_classification;
   }
