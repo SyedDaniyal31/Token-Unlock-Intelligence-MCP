@@ -52,7 +52,7 @@ import {
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
 import { resolveAsset } from "../core/assetResolver.js";
-import { fetchOnchainData } from "../core/dataFetchLayer.js";
+import { fetchOnchainData, fetchUnlockData } from "../core/dataFetchLayer.js";
 import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
@@ -120,9 +120,13 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "unlock_only" | "combined" | "supply_only" | "insufficient";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
+  /** Unlock provider name (e.g. CryptoRank, ManualRegistry). */
+  unlock_provider?: string;
+  /** Unlock provider confidence 0–1. */
+  unlock_provider_confidence?: number;
   /** Optional enrichment (market_cap_usd, volume_24h_usd, liquidity_usd, unlock_amount_usd, unlock_market_cap_impact). */
   market_cap_usd?: number;
   volume_24h_usd?: number;
@@ -266,7 +270,7 @@ export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): Suppl
  */
 export function buildStructuredNoDataSupplyRisk(
   token_symbol: string,
-  analysisScope: "dynamic" | "registry",
+  analysisScope: "dynamic" | "registry" | "unlock_only",
   no_results_reason: string,
   engine_latency_ms: number,
   analysisTimestamp: string,
@@ -276,7 +280,8 @@ export function buildStructuredNoDataSupplyRisk(
   const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
   const isNativeUntracked =
     no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET" ||
-    no_results_reason === "native_non_evm_asset";
+    no_results_reason === "native_non_evm_asset" ||
+    no_results_reason === "UNTRACKED_NATIVE";
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
@@ -299,7 +304,7 @@ export function buildStructuredNoDataSupplyRisk(
     records_found: 0,
     no_results_reason,
     coverage: {
-      registry_checked: analysisScope === "registry",
+      registry_checked: analysisScope === "registry" || analysisScope === "unlock_only",
       dynamic_checked: analysisScope === "dynamic",
       records_found: 0,
     },
@@ -313,6 +318,56 @@ export function buildStructuredNoDataSupplyRisk(
     analysis_timestamp: analysisTimestamp,
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: Math.max(0, Number.isFinite(dataFreshnessSeconds) ? dataFreshnessSeconds : 0),
+  };
+  full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
+  return full;
+}
+
+/**
+ * Build supply risk result for non-EVM assets using unlock schedule only (no RPC/explorer).
+ * Used when asset.supported === false but unlockData.success === true.
+ */
+function buildUnlockOnlySupplyRisk(
+  token_symbol: string,
+  unlockData: { nextUnlockTimestamp?: number | null; unlockEvents?: { unlock_timestamp: number }[] | null; source?: string },
+  analysisTimestamp: string
+): SupplyRiskOutputFlat {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
+  const eventCount = unlockData.unlockEvents?.length ?? 0;
+  const nextUnlock = unlockData.nextUnlockTimestamp ?? null;
+  const hasCliff = eventCount > 0 && nextUnlock != null && nextUnlock > nowSec;
+  const pressureRatio = eventCount > 0 ? Math.min(1, 0.2 + eventCount * 0.05) : 0;
+  const classification = getUnlockPressureClassification(pressureRatio);
+  const riskTier = eventCount >= 10 ? "HIGH" : eventCount >= 3 ? "MODERATE" : eventCount >= 1 ? "LOW" : "LOW";
+  const full: SupplyRiskOutputFlat = {
+    ...base,
+    engine_latency_ms: 0,
+    result_integrity_hash: "",
+    next_estimated_unlock_timestamp: nextUnlock,
+    unlock_schedule_status: nextUnlock != null ? "active" : "completed",
+    unlock_pressure_ratio: Number(pressureRatio.toFixed(4)),
+    unlock_pressure_classification: classification,
+    cliff_detected: hasCliff,
+    risk_tier: riskTier,
+    risk_flags: eventCount > 0 ? ["UNLOCK_SCHEDULE"] : base.risk_flags,
+    analysis_scope: "unlock_only",
+    analysis_provenance: {
+      primary_model: "registry",
+      fallback_used: false,
+      unlock_data_available: true,
+      confidence_basis: "unlock_events",
+    },
+    unlock_data_source: (unlockData.source as "registry" | "external_calendar" | "scanner" | "inferred") ?? "registry",
+    search_exhausted: false,
+    records_found: eventCount > 0 ? 1 : 0,
+    no_results_reason: undefined,
+    coverage: { registry_checked: true, dynamic_checked: false, records_found: eventCount > 0 ? 1 : 0 },
+    analysis_completion_status: "success",
+    data_availability_status: "data_available",
+    analysis_timestamp: analysisTimestamp,
+    engine_version: ENGINE_VERSION,
+    data_freshness_seconds: 0,
   };
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   return full;
@@ -383,16 +438,23 @@ export async function runAnalyzeTokenSupplyRisk(
     chain: chainSlug,
   });
 
-  // STEP 2 — Support Gate: stop here if unsupported.
+  // STEP 2 — Unlock data is chain-agnostic: always fetch for all assets.
+  const unlockData = await fetchUnlockData(asset);
+
+  // STEP 3 — Non-EVM path: skip RPC/explorer; use unlock data only if available.
   if (!asset.supported) {
-    const reason =
-      asset.chain_type === "non_evm" ? "native_non_evm_asset" : "chain_not_supported";
+    if (unlockData.success) {
+      return {
+        success: true,
+        data: buildUnlockOnlySupplyRisk(asset.symbol, unlockData, analysisTimestamp),
+      };
+    }
     return {
       success: true,
       data: buildStructuredNoDataSupplyRisk(
         asset.symbol,
-        "registry",
-        reason,
+        "unlock_only",
+        "UNTRACKED_NATIVE",
         0,
         analysisTimestamp,
         0
@@ -404,7 +466,7 @@ export async function runAnalyzeTokenSupplyRisk(
   tokenAddress = asset.contract_address ?? tokenAddress;
   chainSlug = asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" ? asset.chain : undefined;
 
-  // STEP 3 — Data integrity: invalid contract (totalSupply <= 0) before analysis.
+  // STEP 4 — Data integrity: invalid contract (totalSupply <= 0) before analysis.
   if (tokenAddress && chainSlug) {
     const onchain = await fetchOnchainData(asset);
     if (!onchain.success || (onchain.totalSupply != null && onchain.totalSupply <= 0)) {

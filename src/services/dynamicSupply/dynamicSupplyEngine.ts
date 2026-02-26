@@ -8,7 +8,8 @@ import { acquireDynamicEngineSlot } from "../../core/engineConcurrencyGuard.js";
 import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnalyzer.js";
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
-import { resolveUnifiedUnlockIntelligence } from "../../intelligence/unifiedUnlockResolver.js";
+import { resolveAsset } from "../../core/assetResolver.js";
+import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
@@ -83,7 +84,11 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "unlock_only" | "combined" | "supply_only" | "insufficient";
+  /** Unlock provider name (e.g. CryptoRank, ManualRegistry). */
+  unlock_provider?: string;
+  /** Unlock provider confidence 0–1. */
+  unlock_provider_confidence?: number;
   analysis_provenance: {
     primary_model: "registry" | "dynamic_unlock" | "holder_distribution";
     fallback_used: boolean;
@@ -119,6 +124,12 @@ function toNum(x: unknown): number {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
+}
+
+const TIER_ORDER = { LOW: 0, MODERATE: 1, HIGH: 2, EXTREME: 3 } as const;
+type Tier = keyof typeof TIER_ORDER;
+function combineRiskTiers(a: Tier, b: Tier): Tier {
+  return TIER_ORDER[a] >= TIER_ORDER[b] ? a : b;
 }
 
 const LIQUIDITY_FREE_FLOAT_THRESHOLD_USD = 10_000_000;
@@ -197,6 +208,18 @@ export async function runDynamicSupplyEngine(
   const addr = input.token_address.startsWith("0x")
     ? input.token_address
     : "0x" + input.token_address;
+
+  const asset = await resolveAsset({
+    symbol: input.symbol ?? "",
+    token_address: addr,
+    chain: input.chain,
+  });
+  if (!asset.supported) {
+    logger.info({ symbol: asset.symbol, chain_type: asset.chain_type }, "ASSET_UNSUPPORTED");
+    const out = defaultOutput(1, toNum(input.volume30dUsd), undefined, 0, 0, Math.floor(executionNowMs / 1000));
+    out.no_results_reason = "UNSUPPORTED_ASSET";
+    return out;
+  }
 
   let totalSupply = toNum(input.totalSupply);
   let decimals = 18;
@@ -303,32 +326,37 @@ export async function runDynamicSupplyEngine(
   }
   throwIfAborted(signal);
 
-  // Unified Unlock Intelligence Layer Integration
+  // Single unlock source: unlockProviderEngine (no conditional bypass).
   const tUnlockStart = Date.now();
-  const unlockIntel = await resolveUnifiedUnlockIntelligence({
-    tokenAddress: addr,
-    tokenSymbol: input.symbol,
-    chain: input.chain,
-  });
-  logger.info({ ms: Date.now() - tUnlockStart, source: unlockIntel.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
+  const unlockData = await resolveUnlockData(asset);
+  if (!unlockData.success) {
+    logger.info({ symbol: asset.symbol }, "UNLOCK_PROVIDER_NO_DATA");
+  }
+  logger.info({ ms: Date.now() - tUnlockStart, source: unlockData.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
 
-  let nextUnlockTs: number | null = unlockIntel.nextUnlockTimestamp ?? null;
-  if (unlockIntel.unlockPressureRatio != null && Number.isFinite(unlockIntel.unlockPressureRatio)) {
-    unlockPressureRatio = Number(unlockIntel.unlockPressureRatio);
-  }
-  if (unlockIntel.unlockEvents != null && unlockIntel.unlockEvents.length > 0) {
+  const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
+    CryptoRank: "external_calendar",
+    ManualRegistry: "registry",
+  };
+  const unlockIntelSource = unlockData.source === "none" ? "inferred" as const : (sourceMap[unlockData.source] ?? "inferred");
+  const unlockIntelEvents = unlockData.events.length > 0
+    ? unlockData.events.map((e) => ({ unlock_timestamp: e.unlock_timestamp, amount: String(e.unlock_amount) }))
+    : null;
+  const nextUnlockTs: number | null = unlockData.next_unlock_timestamp ?? null;
+
+  if (unlockIntelEvents != null && unlockIntelEvents.length > 0) {
     const priceForUnlockCalc =
       enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
         ? enrichment.priceUsd
         : toNum(input.price);
-    const totalUnlockTokens = unlockIntel.unlockEvents.reduce(
+    const totalUnlockTokens = unlockIntelEvents.reduce(
       (sum, e) => sum + (Number.isFinite(Number(e.amount)) ? Number(e.amount) : 0),
       0
     );
     if (volume30d > 0 && priceForUnlockCalc > 0 && totalUnlockTokens > 0) {
       const pressureFromEvents = (totalUnlockTokens * priceForUnlockCalc) / volume30d;
-      if (Number.isFinite(pressureFromEvents) && (unlockIntel.unlockPressureRatio == null || !Number.isFinite(unlockIntel.unlockPressureRatio))) {
+      if (Number.isFinite(pressureFromEvents)) {
         unlockPressureRatio = pressureFromEvents;
       }
     }
@@ -336,10 +364,12 @@ export async function runDynamicSupplyEngine(
   if (Number.isFinite(unlockPressureRatio) === false) unlockPressureRatio = 0;
   const pressureRatioClean = Math.max(0, unlockPressureRatio);
   const unlock_data_available =
-    unlockIntel.source !== "inferred" &&
-    ( (unlockIntel.unlockEvents != null && unlockIntel.unlockEvents.length > 0) ||
-      unlockIntel.nextUnlockTimestamp != null ||
-      (unlockIntel.unlockPressureRatio != null && Number(unlockIntel.unlockPressureRatio) > 0) );
+    unlockIntelSource !== "inferred" &&
+    (unlockIntelEvents != null && unlockIntelEvents.length > 0 || nextUnlockTs != null);
+
+  const hasUnlockData = unlock_data_available;
+  const hasOnchainData = totalSupply > 0;
+
   const emissionTrend = 0;
   const cliffPct = 0;
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, inflation30d, cliffPct);
@@ -442,6 +472,9 @@ export async function runDynamicSupplyEngine(
     supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
   }
   const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
+
+  const unlockRiskScore: Tier | null = hasUnlockData ? (unlockPressureClassification as Tier) : null;
+  const supplyRiskScore: Tier | null = hasOnchainData ? (getRiskTier(liquidityStressRounded) as Tier) : null;
 
   const forwardCurve = buildForwardRiskWithUncertainty(risk30d, risk90d, risk180d, {
     volatilityHint: pressureRatioClean > 0.5 ? 0.4 : 0.2,
@@ -556,13 +589,25 @@ export async function runDynamicSupplyEngine(
     },
   };
 
-  // Unified Unlock Intelligence Layer: set source and data availability (inferred → allow inference block).
-  out.unlock_data_source = unlockIntel.source;
-  out.next_estimated_unlock_timestamp = nextUnlockTs;
-  out.analysis_provenance.unlock_data_available = unlock_data_available;
-  if (!unlock_data_available) {
-    out.risk_tier = "INSUFFICIENT_UNLOCK_DATA";
+  // Layered risk and analysis scope (no short-circuit; liquidity/supply always computed when onchain data exists).
+  if (unlockRiskScore != null && supplyRiskScore != null) {
+    out.risk_tier = combineRiskTiers(unlockRiskScore, supplyRiskScore);
+    out.analysis_scope = "combined";
+  } else if (unlockRiskScore != null) {
+    out.risk_tier = unlockRiskScore;
+    out.analysis_scope = "unlock_only";
+  } else if (supplyRiskScore != null) {
+    out.risk_tier = supplyRiskScore;
+    out.analysis_scope = "supply_only";
+  } else {
+    out.risk_tier = "INSUFFICIENT_DATA";
+    out.analysis_scope = "insufficient";
   }
+  out.unlock_data_source = unlockIntelSource;
+  out.next_estimated_unlock_timestamp = nextUnlockTs;
+  out.unlock_provider = unlockData.source;
+  out.unlock_provider_confidence = unlockData.confidence_score ?? 0;
+  out.analysis_provenance.unlock_data_available = unlock_data_available;
 
   if (shouldApplySupplyShockInference(unlock_data_available)) {
     const inferred = inferSupplyShockUnlock({
@@ -652,6 +697,7 @@ export async function runDynamicSupplyEngine(
     supply_volatility_index: out.supply_volatility_index,
     inflation_rate_30d: out.inflation_rate_30d,
     confidence_score: out.confidence_score ?? 100,
+    unlock_provider_confidence: unlockData.confidence_score,
   });
   out.supply_shock_index = ssi.supply_shock_index;
   out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;

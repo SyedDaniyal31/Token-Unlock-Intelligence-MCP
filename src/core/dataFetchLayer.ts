@@ -6,7 +6,7 @@
 import type { AssetMetadata } from "./assetResolver.js";
 import { getRpcUrl, readErc20SupplyFromRpc } from "../services/unlockScanner/chainClient.js";
 import { getSupplyFromCacheWithTimestamp, setSupplyInCache } from "../services/dynamicSupply/supplyCache.js";
-import { resolveUnifiedUnlockIntelligence } from "../intelligence/unifiedUnlockResolver.js";
+import { resolveUnlockData } from "../unlock/unlockProviderEngine.js";
 
 export interface OnchainFetchResult {
   success: boolean;
@@ -71,26 +71,26 @@ export async function fetchExplorerData(_asset: AssetMetadata): Promise<Explorer
 }
 
 /**
- * Fetch unlock intelligence. Never throws.
+ * Fetch unlock intelligence via provider engine. Never throws.
+ * Chain-agnostic: runs for ALL assets (EVM and non-EVM). Unlock schedules are not tied to chain support.
  */
 export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetchResult> {
-  if (asset.chain_type !== "evm" || asset.chain === "unsupported") {
-    return { success: false };
-  }
   try {
-    const out = await resolveUnifiedUnlockIntelligence({
-      tokenAddress: asset.contract_address ?? undefined,
-      tokenSymbol: asset.symbol,
-      chain: asset.chain,
-    });
-    const hasData =
-      (out.unlockEvents != null && out.unlockEvents.length > 0) ||
-      (out.nextUnlockTimestamp != null && Number.isFinite(out.nextUnlockTimestamp));
+    const result = await resolveUnlockData(asset);
+    const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
+      CryptoRank: "external_calendar",
+      ManualRegistry: "registry",
+    };
+    const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");
+    const unlockEvents =
+      result.events.length > 0
+        ? result.events.map((e) => ({ unlock_timestamp: e.unlock_timestamp }))
+        : null;
     return {
-      success: true,
-      source: out.source,
-      unlockEvents: out.unlockEvents ?? null,
-      nextUnlockTimestamp: out.nextUnlockTimestamp ?? null,
+      success: result.success,
+      source,
+      unlockEvents,
+      nextUnlockTimestamp: result.next_unlock_timestamp ?? null,
     };
   } catch {
     return { success: false };

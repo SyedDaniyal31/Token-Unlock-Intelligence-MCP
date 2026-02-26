@@ -11,6 +11,8 @@ export interface SupplyShockFusionInput {
   supply_volatility_index: number;
   inflation_rate_30d: number;
   confidence_score: number;
+  /** Unlock provider confidence 0–1; weights unlock term. Default 1 for backward compatibility. */
+  unlock_provider_confidence?: number;
 }
 
 export interface SupplyShockFusionOutput {
@@ -37,9 +39,11 @@ function normalize01(value: number, max?: number): number {
   return clamp(v / cap, 0, 1);
 }
 
+const BASE_UNLOCK_WEIGHT = 0.35;
+
 /**
  * Compute Supply Shock Fusion Index (SSI) from normalized inputs.
- * Weights: unlock 0.35, liquidity 0.25, volatility 0.20, inflation 0.20.
+ * Weights: unlock 0.35 (× unlock_provider_confidence ?? 1), liquidity 0.25, volatility 0.20, inflation 0.20.
  * Adjusted by confidence; scaled to 0–100.
  */
 export function computeSupplyShockFusion(input: SupplyShockFusionInput): SupplyShockFusionOutput {
@@ -48,8 +52,9 @@ export function computeSupplyShockFusion(input: SupplyShockFusionInput): SupplyS
   const volatilityNorm = normalize01(input.supply_volatility_index, 100);
   const inflationNorm = normalize01(input.inflation_rate_30d, 100);
 
+  const effectiveUnlockWeight = BASE_UNLOCK_WEIGHT * (input.unlock_provider_confidence ?? 1);
   let ssiRaw =
-    unlockNorm * 0.35 +
+    unlockNorm * effectiveUnlockWeight +
     liquidityNorm * 0.25 +
     volatilityNorm * 0.2 +
     inflationNorm * 0.2;
