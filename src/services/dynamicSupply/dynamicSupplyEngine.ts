@@ -1,6 +1,16 @@
 /**
  * Dynamic token supply risk engine: works for any ERC-20/BEP-20 without static registry.
  * Includes quantitative analytics: uncertainty, volume fusion, concentration, depth, emission momentum, optional shock simulation.
+ *
+ * Unlock Pressure Separation Model
+ *
+ * unlock_pressure_ratio:
+ *   - Represents scheduled unlock pressure from calendar/provider data ONLY.
+ *
+ * inferred_distribution_pressure:
+ *   - Represents modeled distribution risk when no scheduled unlock data exists.
+ *
+ * These two signals must never be merged.
  */
 
 import logger from "../../core/logger.js";
@@ -112,6 +122,10 @@ export interface DynamicSupplyOutput {
   supply_shock_risk_tier?: string;
   /** True when high unlock + high liquidity stress triggered SSI cascade boost. */
   cascade_risk_detected?: boolean;
+  /** Inferred supply/distribution pressure when no scheduled unlock data; only set when unlock_data_available is false. */
+  inferred_distribution_pressure?: number;
+  /** Risk classification of inferred distribution pressure (e.g. MODERATE); only set when unlock_data_available is false. */
+  inferred_distribution_classification?: string;
   /** Set when engine returns early (e.g. INVALID_SUPPLY) for structured no-data. */
   no_results_reason?: string;
 }
@@ -623,11 +637,18 @@ export async function runDynamicSupplyEngine(
       market_enrichment_available: enrichment != null,
       block_freshness_hint: blockNumberUsed > 0 ? 1 : 0,
     });
-    out.unlock_pressure_ratio = Number(Number(inferred.synthetic_unlock_pressure).toFixed(4));
-    out.unlock_pressure_classification = inferred.unlock_pressure_classification;
+    // Scheduled unlock fields: ONLY represent calendar/provider data. Never assign inferred values to them.
+    out.unlock_pressure_ratio = 0;
+    out.unlock_pressure_classification = "NO_SCHEDULED_DATA";
+    out.inferred_distribution_pressure = Number(Number(inferred.synthetic_unlock_pressure).toFixed(4));
+    out.inferred_distribution_classification = inferred.unlock_pressure_classification;
     out.unlock_model = inferred.unlock_model;
     out.inference_source = inferred.inference_source;
     out.confidence_score = inferred.confidence_score;
+    out.analysis_scope = "dynamic_fallback";
+    out.unlock_data_source = "inferred";
+    out.unlock_provider = "none";
+    out.unlock_provider_confidence = 0;
     out.analysis_provenance = {
       primary_model: "dynamic_unlock",
       fallback_used: true,
@@ -693,6 +714,8 @@ export async function runDynamicSupplyEngine(
     };
   }
 
+  // IMPORTANT: SSI must only reflect scheduled unlock pressure.
+  // Inferred distribution pressure is informational and must not inflate SSI.
   const ssi = computeSupplyShockFusion({
     unlock_pressure_ratio: out.unlock_pressure_ratio,
     liquidity_stress_score: out.liquidity_stress_score,
@@ -704,6 +727,12 @@ export async function runDynamicSupplyEngine(
   out.supply_shock_index = ssi.supply_shock_index;
   out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
   if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
+
+  // When scheduled unlock exists, inferred fields must not appear (mutual exclusivity).
+  if (out.unlock_data_available && out.inferred_distribution_pressure != null) {
+    delete out.inferred_distribution_pressure;
+    delete out.inferred_distribution_classification;
+  }
 
   logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
   setMemoizedResult(memoKey, blockNumberUsed, out);

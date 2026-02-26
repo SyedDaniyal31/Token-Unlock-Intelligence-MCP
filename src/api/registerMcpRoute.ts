@@ -130,8 +130,11 @@ const MCP_TOOLS = [
         inflation_rate_90d: { type: "number" as const },
         supply_volatility_index: { type: "number" as const },
         emission_trend: { type: "number" as const },
-        unlock_pressure_ratio: { type: "number" as const },
-        unlock_pressure_classification: { type: "string" as const },
+        unlock_pressure_ratio: { type: "number" as const, description: "Scheduled unlock pressure from calendar/scanner; 0 when no unlock data." },
+        unlock_pressure_classification: {
+          type: "string" as const,
+          description: "LOW | MODERATE | HIGH | EXTREME from scheduled unlocks; NO_SCHEDULED_DATA when no calendar/scanner data.",
+        },
         fused_volume_30d_usd: { type: "number" as const },
         liquidity_stress_score: { type: "number" as const },
         cliff_detected: { type: "boolean" as const },
@@ -270,6 +273,14 @@ const MCP_TOOLS = [
           type: "string" as const,
           enum: ["LOW", "MODERATE", "HIGH", "EXTREME"] as const,
           description: "SSI risk tier: 0–25 LOW, 26–50 MODERATE, 51–75 HIGH, 76–100 EXTREME.",
+        },
+        inferred_distribution_pressure: {
+          type: "number" as const,
+          description: "Inferred supply/distribution pressure when no scheduled unlock data; 0 or omitted when unlock data available.",
+        },
+        inferred_distribution_classification: {
+          type: "string" as const,
+          description: "Risk classification of inferred distribution pressure (e.g. MODERATE); only set when unlock_data_available is false.",
         },
       },
       required: [
