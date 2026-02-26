@@ -204,6 +204,14 @@ async function fetchCryptoRankUnlocks(apiKey: string): Promise<CryptoRankUnlockR
     logger.warn({ status: 404 }, "CryptoRank unlock endpoint not found");
     return [];
   }
+  if (response.status === 403) {
+    const text = await response.text();
+    console.error("CryptoRank error body:", text);
+    logger.warn(
+      "CryptoRank token-unlock endpoint is not available on your API plan (403). Upgrade your CryptoRank plan or use manual registry (unlock_events_external) for unlock data."
+    );
+    return [];
+  }
   if (!response.ok) {
     const text = await response.text();
     console.error("CryptoRank error body:", text);

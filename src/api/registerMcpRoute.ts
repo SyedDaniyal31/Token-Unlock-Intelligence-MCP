@@ -1011,7 +1011,7 @@ export function registerMcpRoute(
           response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
         }
       }
-      logger.error(
+      logger.info(
         {
           id: requestId,
           method: methodName,

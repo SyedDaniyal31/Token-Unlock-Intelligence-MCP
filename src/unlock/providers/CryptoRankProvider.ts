@@ -4,6 +4,7 @@
 
 import type { AssetMetadata } from "../../core/assetResolver.js";
 import { config } from "../../core/config.js";
+import logger from "../../core/logger.js";
 import type { NormalizedUnlockEvent, UnlockFetchResult } from "./UnlockProvider.js";
 import type { UnlockProvider } from "./UnlockProvider.js";
 
@@ -50,6 +51,17 @@ export const cryptoRankProvider: UnlockProvider = {
         },
       });
 
+      if (response.status === 403) {
+        logger.warn(
+          "CryptoRank token-unlock endpoint is not available on your API plan (403). Upgrade your CryptoRank plan or use manual registry (unlock_events_external) for unlock data."
+        );
+        return {
+          success: false,
+          source: "CryptoRank",
+          events: [],
+          error: "endpoint_not_in_plan",
+        };
+      }
       if (!response.ok) {
         return {
           success: false,

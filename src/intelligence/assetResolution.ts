@@ -26,6 +26,11 @@ export interface AssetResolutionResult {
 
 const SUPPORTED_SET = new Set<string>(SUPPORTED_CHAINS);
 
+/** Known EVM tokens that CoinGecko/registry may miss; symbol → chain + contract. */
+const KNOWN_EVM_SYMBOLS: Record<string, { chain: ChainSlug; contract_address: string }> = {
+  SOPH: { chain: "ethereum", contract_address: "0x0000000000004946c0e9F43F4Dee607b0eF1fA1c" },
+};
+
 function dataSourcesForEvm(chain: ChainSlug): DataSourcesAvailable {
   const supported = chain !== "unsupported" && SUPPORTED_SET.has(chain);
   return {
@@ -106,6 +111,19 @@ export async function resolveAsset(input: {
       is_native_asset: false,
       data_sources_available: dataSourcesForEvm(resolved.chain as ChainSlug),
       symbol: resolved.symbol,
+    };
+  }
+
+  // Known EVM symbol fallback (e.g. SOPH when CoinGecko/registry miss)
+  if (symbol && KNOWN_EVM_SYMBOLS[symbol]) {
+    const known = KNOWN_EVM_SYMBOLS[symbol];
+    return {
+      chain_type: "evm",
+      chain: known.chain,
+      contract_address: known.contract_address,
+      is_native_asset: false,
+      data_sources_available: dataSourcesForEvm(known.chain),
+      symbol,
     };
   }
 
