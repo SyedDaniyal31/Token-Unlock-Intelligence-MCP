@@ -19,7 +19,7 @@ import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnal
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { resolveAsset, type AssetMetadata } from "../../core/assetResolver.js";
-import { resolveUnifiedUnlockIntelligence } from "../../intelligence/unifiedUnlockResolver.js";
+import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
@@ -342,40 +342,34 @@ export async function runDynamicSupplyEngine(
   }
   throwIfAborted(signal);
 
-  // Unified Unlock Intelligence: registry → external_calendar → on-chain scanner → inferred (no manual registry required for EVM).
+  // Provider engine: DefiLlama → ManualRegistry (single unlock source for dynamic EVM path).
   const tUnlockStart = Date.now();
-  const unified = await resolveUnifiedUnlockIntelligence({
-    tokenAddress: asset.contract_address ?? undefined,
-    tokenSymbol: asset.symbol,
-    chain: asset.chain,
-  });
-  const unlockIntelSource = unified.source;
-  const unlockIntelEvents = (unified.unlockEvents?.length ?? 0) > 0
-    ? unified.unlockEvents!.map((e) => ({
-        unlock_timestamp: e.unlock_timestamp,
-        amount: e.amount != null ? String(e.amount) : "0",
-      }))
-    : null;
-  const nextUnlockTs: number | null = unified.nextUnlockTimestamp ?? null;
-  if (typeof unified.unlockPressureRatio === "number" && Number.isFinite(unified.unlockPressureRatio) && unified.unlockPressureRatio >= 0) {
-    unlockPressureRatio = unified.unlockPressureRatio;
-  }
-  if (!unlockIntelSource || unlockIntelSource === "inferred") {
+  const unlockData = await resolveUnlockData(asset);
+  if (!unlockData.success) {
     logger.info({ symbol: asset.symbol }, "UNLOCK_PROVIDER_NO_DATA");
   }
-  logger.info({ ms: Date.now() - tUnlockStart, source: unlockIntelSource }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
+  logger.info({ ms: Date.now() - tUnlockStart, source: unlockData.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
 
-  const unlockData = {
-    success: unlockIntelSource !== "inferred" &&
-      ((unlockIntelEvents != null && unlockIntelEvents.length > 0) || nextUnlockTs != null || (Number.isFinite(unlockPressureRatio) && unlockPressureRatio > 0)),
-    source: unlockIntelSource === "registry" ? "ManualRegistry" : unlockIntelSource === "external_calendar" ? "CryptoRank" : unlockIntelSource === "scanner" ? "scanner" : "none",
-    events: unlockIntelEvents ?? [],
-    next_unlock_timestamp: nextUnlockTs,
-    confidence_score: unified.confidenceScore ?? 0,
-  };
+  let unlockIntelSource: "registry" | "external_calendar" | "scanner" | "inferred" = "inferred";
+  let unlockIntelEvents: { unlock_timestamp: number; amount: string }[] = [];
+  let nextUnlockTs: number | null = null;
+  let providerUsed: string = "none";
 
-  if (unlockIntelEvents != null && unlockIntelEvents.length > 0) {
+  if (unlockData.success && unlockData.events.length > 0) {
+    providerUsed = unlockData.source ?? "external_calendar";
+    unlockIntelSource =
+      unlockData.source === "ManualRegistry"
+        ? "registry"
+        : "external_calendar";
+    unlockIntelEvents = unlockData.events.map((e) => ({
+      unlock_timestamp: e.unlock_timestamp,
+      amount: String(e.unlock_amount),
+    }));
+    nextUnlockTs = unlockData.next_unlock_timestamp ?? null;
+  }
+
+  if (unlockIntelEvents.length > 0) {
     const priceForUnlockCalc =
       enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
         ? enrichment.priceUsd
@@ -395,7 +389,7 @@ export async function runDynamicSupplyEngine(
   const pressureRatioClean = Math.max(0, unlockPressureRatio);
   const unlock_data_available =
     unlockIntelSource !== "inferred" &&
-    ((unlockIntelEvents != null && unlockIntelEvents.length > 0) || nextUnlockTs != null || (Number.isFinite(unlockPressureRatio) && unlockPressureRatio > 0));
+    (unlockIntelEvents.length > 0 || nextUnlockTs !== null);
 
   const hasUnlockData = unlock_data_available;
   const hasOnchainData = totalSupply > 0;
@@ -635,8 +629,9 @@ export async function runDynamicSupplyEngine(
   }
   out.unlock_data_source = unlockIntelSource;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
-  out.unlock_provider = unlockData.source;
-  out.unlock_provider_confidence = unlockData.confidence_score ?? 0;
+  out.unlock_provider = providerUsed;
+  out.unlock_provider_confidence =
+    providerUsed === "none" ? 0 : (typeof unlockData.confidence_score === "number" ? unlockData.confidence_score : 0);
   out.analysis_provenance.unlock_data_available = unlock_data_available;
 
   if (shouldApplySupplyShockInference(unlock_data_available)) {
@@ -736,7 +731,7 @@ export async function runDynamicSupplyEngine(
     supply_volatility_index: out.supply_volatility_index,
     inflation_rate_30d: out.inflation_rate_30d,
     confidence_score: out.confidence_score ?? 100,
-    unlock_provider_confidence: unlockData.confidence_score,
+    unlock_provider_confidence: providerUsed === "none" ? 0 : (typeof unlockData.confidence_score === "number" ? unlockData.confidence_score : 0),
   });
   out.supply_shock_index = ssi.supply_shock_index;
   out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
