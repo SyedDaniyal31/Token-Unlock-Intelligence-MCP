@@ -19,7 +19,7 @@ import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnal
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { resolveAsset, type AssetMetadata } from "../../core/assetResolver.js";
-import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
+import { resolveUnifiedUnlockIntelligence } from "../../intelligence/unifiedUnlockResolver.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
@@ -342,24 +342,38 @@ export async function runDynamicSupplyEngine(
   }
   throwIfAborted(signal);
 
-  // Single unlock source: unlockProviderEngine (no conditional bypass).
+  // Unified Unlock Intelligence: registry → external_calendar → on-chain scanner → inferred (no manual registry required for EVM).
   const tUnlockStart = Date.now();
-  const unlockData = await resolveUnlockData(asset);
-  if (!unlockData.success) {
+  const unified = await resolveUnifiedUnlockIntelligence({
+    tokenAddress: asset.contract_address ?? undefined,
+    tokenSymbol: asset.symbol,
+    chain: asset.chain,
+  });
+  const unlockIntelSource = unified.source;
+  const unlockIntelEvents = (unified.unlockEvents?.length ?? 0) > 0
+    ? unified.unlockEvents!.map((e) => ({
+        unlock_timestamp: e.unlock_timestamp,
+        amount: e.amount != null ? String(e.amount) : "0",
+      }))
+    : null;
+  const nextUnlockTs: number | null = unified.nextUnlockTimestamp ?? null;
+  if (typeof unified.unlockPressureRatio === "number" && Number.isFinite(unified.unlockPressureRatio) && unified.unlockPressureRatio >= 0) {
+    unlockPressureRatio = unified.unlockPressureRatio;
+  }
+  if (!unlockIntelSource || unlockIntelSource === "inferred") {
     logger.info({ symbol: asset.symbol }, "UNLOCK_PROVIDER_NO_DATA");
   }
-  logger.info({ ms: Date.now() - tUnlockStart, source: unlockData.source }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
+  logger.info({ ms: Date.now() - tUnlockStart, source: unlockIntelSource }, "STAGE_UNIFIED_UNLOCK_INTEL_DONE");
   throwIfAborted(signal);
 
-  const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
-    CryptoRank: "external_calendar",
-    ManualRegistry: "registry",
+  const unlockData = {
+    success: unlockIntelSource !== "inferred" &&
+      ((unlockIntelEvents != null && unlockIntelEvents.length > 0) || nextUnlockTs != null || (Number.isFinite(unlockPressureRatio) && unlockPressureRatio > 0)),
+    source: unlockIntelSource === "registry" ? "ManualRegistry" : unlockIntelSource === "external_calendar" ? "CryptoRank" : unlockIntelSource === "scanner" ? "scanner" : "none",
+    events: unlockIntelEvents ?? [],
+    next_unlock_timestamp: nextUnlockTs,
+    confidence_score: unified.confidenceScore ?? 0,
   };
-  const unlockIntelSource = unlockData.source === "none" ? "inferred" as const : (sourceMap[unlockData.source] ?? "inferred");
-  const unlockIntelEvents = unlockData.events.length > 0
-    ? unlockData.events.map((e) => ({ unlock_timestamp: e.unlock_timestamp, amount: String(e.unlock_amount) }))
-    : null;
-  const nextUnlockTs: number | null = unlockData.next_unlock_timestamp ?? null;
 
   if (unlockIntelEvents != null && unlockIntelEvents.length > 0) {
     const priceForUnlockCalc =
@@ -381,7 +395,7 @@ export async function runDynamicSupplyEngine(
   const pressureRatioClean = Math.max(0, unlockPressureRatio);
   const unlock_data_available =
     unlockIntelSource !== "inferred" &&
-    (unlockIntelEvents != null && unlockIntelEvents.length > 0 || nextUnlockTs != null);
+    ((unlockIntelEvents != null && unlockIntelEvents.length > 0) || nextUnlockTs != null || (Number.isFinite(unlockPressureRatio) && unlockPressureRatio > 0));
 
   const hasUnlockData = unlock_data_available;
   const hasOnchainData = totalSupply > 0;
