@@ -520,8 +520,9 @@ export async function runAnalyzeTokenSupplyRisk(
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       full.analysis_completion_status = "success";
+      // Full technical result: do not set data_availability_status to "no_unlock_data" when only unlock calendar is missing (proposal: "remains functional when calendar data is unavailable").
+      full.data_availability_status = full.data_availability_status ?? "data_available";
       const noUnlockData = full.analysis_provenance?.unlock_data_available === false;
-      full.data_availability_status = full.data_availability_status ?? (noUnlockData ? "no_unlock_data" : "data_available");
       if (noUnlockData) delete (full as unknown as Record<string, unknown>).next_estimated_unlock_timestamp;
       setCachedResult(cacheKey, full);
       if (full == null || (Array.isArray(full) && full.length === 0)) {
