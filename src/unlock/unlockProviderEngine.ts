@@ -5,10 +5,10 @@
 
 import type { AssetMetadata } from "../core/assetResolver.js";
 import type { UnlockFetchResult, UnlockProvider } from "./providers/UnlockProvider.js";
-import { cryptoRankProvider } from "./providers/CryptoRankProvider.js";
+import { defiLlamaProvider } from "./providers/DefiLlamaProvider.js";
 import { manualRegistryProvider } from "./providers/ManualRegistryProvider.js";
 
-const providers: UnlockProvider[] = [cryptoRankProvider, manualRegistryProvider];
+const providers: UnlockProvider[] = [defiLlamaProvider, manualRegistryProvider];
 
 function filterFutureAndSort(events: UnlockFetchResult["events"], nowSec: number): UnlockFetchResult["events"] {
   return events
