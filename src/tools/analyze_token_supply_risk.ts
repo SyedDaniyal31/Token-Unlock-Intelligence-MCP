@@ -51,7 +51,8 @@ import {
   setCachedResult,
   type SupplyRiskCacheParams,
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
-import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
+import { resolveAsset } from "../core/assetResolver.js";
+import { fetchOnchainData } from "../core/dataFetchLayer.js";
 import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
@@ -273,7 +274,9 @@ export function buildStructuredNoDataSupplyRisk(
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
   const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
-  const isNativeUntracked = no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET";
+  const isNativeUntracked =
+    no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET" ||
+    no_results_reason === "native_non_evm_asset";
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
@@ -301,7 +304,11 @@ export function buildStructuredNoDataSupplyRisk(
       records_found: 0,
     },
     analysis_completion_status: "completed_no_data",
-    data_availability_status: isNativeUntracked ? "native_chain_untracked" : "completed_no_data",
+    data_availability_status: isNativeUntracked
+      ? "native_chain_untracked"
+      : no_results_reason === "invalid_contract"
+        ? "invalid_contract"
+        : "completed_no_data",
     unlock_schedule_status: "completed",
     analysis_timestamp: analysisTimestamp,
     engine_version: ENGINE_VERSION,
@@ -369,19 +376,49 @@ export async function runAnalyzeTokenSupplyRisk(
 
   const executionNowMs = Date.now();
 
-  // Resolve symbol → canonical chain + contract so dynamic engine runs (e.g. ONDO on ETH/BSC).
-  if (symbol && (!tokenAddress || !chainSlug)) {
-    try {
-      const cgData = await fetchCoinGeckoData(symbol);
-      if (cgData?.address && cgData?.platform_chain) {
-        if (!tokenAddress) tokenAddress = cgData.address.trim();
-        if (!chainSlug) {
-          const slug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
-          if (slug) chainSlug = slug;
-        }
-      }
-    } catch {
-      // Leave tokenAddress/chainSlug unchanged; fall through to registry or NO_DATA
+  // STEP 1 — Asset Resolution (mandatory first). No RPC/unlock before this.
+  const asset = await resolveAsset({
+    symbol: symbol || str(input.token_symbol),
+    token_address: tokenAddress || undefined,
+    chain: chainSlug,
+  });
+
+  // STEP 2 — Support Gate: stop here if unsupported.
+  if (!asset.supported) {
+    const reason =
+      asset.chain_type === "non_evm" ? "native_non_evm_asset" : "chain_not_supported";
+    return {
+      success: true,
+      data: buildStructuredNoDataSupplyRisk(
+        asset.symbol,
+        "registry",
+        reason,
+        0,
+        analysisTimestamp,
+        0
+      ),
+    };
+  }
+
+  symbol = asset.symbol;
+  tokenAddress = asset.contract_address ?? tokenAddress;
+  chainSlug = asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" ? asset.chain : undefined;
+
+  // STEP 3 — Data integrity: invalid contract (totalSupply <= 0) before analysis.
+  if (tokenAddress && chainSlug) {
+    const onchain = await fetchOnchainData(asset);
+    if (!onchain.success || (onchain.totalSupply != null && onchain.totalSupply <= 0)) {
+      return {
+        success: true,
+        data: buildStructuredNoDataSupplyRisk(
+          symbol || tokenAddress || "unknown",
+          "dynamic",
+          "invalid_contract",
+          0,
+          analysisTimestamp,
+          0
+        ),
+      };
     }
   }
 
@@ -435,7 +472,8 @@ export async function runAnalyzeTokenSupplyRisk(
       };
       full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
       full.analysis_completion_status = "success";
-      full.data_availability_status = "data_available";
+      const noUnlockData = full.analysis_provenance?.unlock_data_available === false;
+      full.data_availability_status = noUnlockData ? "no_unlock_data" : "data_available";
       setCachedResult(cacheKey, full);
       if (full == null || (Array.isArray(full) && full.length === 0)) {
         const noData = buildStructuredNoDataSupplyRisk(
@@ -448,19 +486,30 @@ export async function runAnalyzeTokenSupplyRisk(
         );
         return { success: true, data: noData };
       }
-      // Case 1: engine returned defaultOutput (no supply/unlock/liquidity data) — return structured NO_DATA
-      if (Array.isArray(full.risk_flags) && full.risk_flags.includes("NO_DATA")) {
+      // Engine returned no-data (e.g. INVALID_SUPPLY or NO_DATA) — return structured NO_DATA
+      if (result.no_results_reason != null && result.no_results_reason !== "") {
         const noData = buildStructuredNoDataSupplyRisk(
           symbol || tokenAddress || "unknown",
           "dynamic",
-          "DYNAMIC_ENGINE_NO_DATA",
+          result.no_results_reason,
           engine_latency_ms,
           analysisTimestamp,
           0
         );
         return { success: true, data: noData };
       }
-      return { success: true, data: { ...full, analysis_completion_status: "success", data_availability_status: "data_available" } };
+      if (Array.isArray(full.risk_flags) && full.risk_flags.includes("NO_DATA")) {
+        const noData = buildStructuredNoDataSupplyRisk(
+          symbol || tokenAddress || "unknown",
+          "dynamic",
+          full.no_results_reason ?? "DYNAMIC_ENGINE_NO_DATA",
+          engine_latency_ms,
+          analysisTimestamp,
+          0
+        );
+        return { success: true, data: noData };
+      }
+      return { success: true, data: { ...full, analysis_completion_status: "success", data_availability_status: full.data_availability_status ?? "data_available" } };
     } catch (err) {
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
       return { success: true, data: buildCompletedNoDataSupplyRisk(engine_latency_ms) };

@@ -107,6 +107,8 @@ export interface DynamicSupplyOutput {
   supply_shock_risk_tier?: string;
   /** True when high unlock + high liquidity stress triggered SSI cascade boost. */
   cascade_risk_detected?: boolean;
+  /** Set when engine returns early (e.g. INVALID_SUPPLY) for structured no-data. */
+  no_results_reason?: string;
 }
 
 function toNum(x: unknown): number {
@@ -249,6 +251,13 @@ export async function runDynamicSupplyEngine(
   if (Date.now() >= deadline) {
     logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
     return defaultOutput(totalSupply, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
+  }
+
+  if (totalSupply <= 0) {
+    logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
+    const out = defaultOutput(1, toNum(input.volume30dUsd), supplySnapshotTs, blockNumberUsed, blockTimestampUsed, Math.floor(executionNowMs / 1000));
+    out.no_results_reason = "INVALID_SUPPLY";
+    return out;
   }
 
   const memoKey = `${chainKey}:${addr.toLowerCase()}`;
@@ -551,6 +560,9 @@ export async function runDynamicSupplyEngine(
   out.unlock_data_source = unlockIntel.source;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
   out.analysis_provenance.unlock_data_available = unlock_data_available;
+  if (!unlock_data_available) {
+    out.risk_tier = "INSUFFICIENT_UNLOCK_DATA";
+  }
 
   if (shouldApplySupplyShockInference(unlock_data_available)) {
     const inferred = inferSupplyShockUnlock({
@@ -719,7 +731,7 @@ export function defaultOutput(
     emission_acceleration_score: 0,
     simulation_outcome: null,
     risk_flags: ["NO_DATA"],
-    risk_tier: "NO_DATA",
+    risk_tier: "INSUFFICIENT_UNLOCK_DATA",
     data_quality_score: 0,
     analysis_provenance: {
       primary_model: "dynamic_unlock",

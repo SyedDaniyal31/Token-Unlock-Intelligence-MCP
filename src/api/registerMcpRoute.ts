@@ -816,7 +816,7 @@ async function handleAnalyzeTokenSupplyRisk(
       const elapsedMs = result.engine_latency_ms ?? 0;
       const completedNoData = buildCompletedNoDataSupplyRisk(elapsedMs);
       if (!isValidSupplyRiskResult(completedNoData)) {
-        logger.error("SUPPLY_VALIDATION_FAILED");
+        logger.warn("SUPPLY_VALIDATION_FAILED");
         const fallback = buildCompletedNoDataSupplyRisk(result.engine_latency_ms ?? 0);
         return normalizeSupplyRiskResult(fallback, id);
       }
@@ -824,7 +824,7 @@ async function handleAnalyzeTokenSupplyRisk(
     }
     const data = result.data;
     if (!isValidSupplyRiskResult(data)) {
-      logger.error("SUPPLY_VALIDATION_FAILED");
+      logger.warn("SUPPLY_VALIDATION_FAILED");
       const softFailure = buildSoftFailureSupplyRisk(
         "VALIDATION_FAILED",
         (data as { engine_latency_ms?: number } | undefined)?.engine_latency_ms ?? 0
@@ -841,7 +841,7 @@ async function handleAnalyzeTokenSupplyRisk(
     logger.error({ err, token }, "MCP analyze_token_supply_risk error");
     const completedNoData = buildCompletedNoDataSupplyRisk(0);
     if (!isValidSupplyRiskResult(completedNoData)) {
-      logger.error("SUPPLY_VALIDATION_FAILED");
+      logger.warn("SUPPLY_VALIDATION_FAILED");
       const fallback = buildCompletedNoDataSupplyRisk(0);
       return normalizeSupplyRiskResult(fallback, id);
     }
