@@ -25,6 +25,7 @@ import { runHolderDistributionAnalysis } from "../../core/holderDistributionAnal
 import { getSupplyFromCache, getSupplyFromCacheWithTimestamp, setSupplyInCache } from "./supplyCache.js";
 import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { resolveAsset, type AssetMetadata } from "../../core/assetResolver.js";
+import { isChainSupported, SUPPORTED_CHAINS } from "../../core/chainCapabilities.js";
 import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
@@ -100,7 +101,13 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported";
+  /** Set when chain is not in supported list (ethereum, bsc, arbitrum, base). */
+  status?: "unsupported_chain";
+  token_symbol?: string;
+  detected_chain?: string;
+  supported_chains?: string[];
+  message?: string;
   /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
   unlock_provider?: string;
   /** Unlock provider confidence 0–1. */
@@ -164,7 +171,7 @@ const HOLDER_CONCENTRATION_FREE_FLOAT_PCT = 40;
  */
 async function shouldRunUnlockScanner(
   tokenAddress: string,
-  chain: "ethereum" | "arbitrum" | "bsc",
+  chain: "ethereum" | "arbitrum" | "bsc" | "base",
   totalSupply: number,
   supplyStable: boolean,
   marketData?: MarketEnrichment | null,
@@ -191,7 +198,7 @@ async function shouldRunUnlockScanner(
 
 export interface DynamicSupplyInput {
   token_address: string;
-  chain: "ethereum" | "arbitrum" | "bsc";
+  chain: "ethereum" | "arbitrum" | "bsc" | "base";
   symbol?: string;
   volume30dUsd?: number;
   /** Multiple volume estimates for weighted fusion and consistency score. */
@@ -242,6 +249,19 @@ export async function runDynamicSupplyEngine(
     logger.info({ symbol: asset.symbol, chain_type: asset.chain_type }, "ASSET_UNSUPPORTED");
     const out = defaultOutput(1, toNum(input.volume30dUsd), undefined, 0, 0, Math.floor(executionNowMs / 1000));
     out.no_results_reason = "UNSUPPORTED_ASSET";
+    return out;
+  }
+
+  if (!isChainSupported(asset.chain)) {
+    logger.warn({ symbol: asset.symbol, chain: asset.chain }, "UNSUPPORTED_CHAIN_DETECTED");
+    const out = defaultOutput(1, toNum(input.volume30dUsd), undefined, 0, 0, Math.floor(executionNowMs / 1000));
+    out.analysis_scope = "unsupported";
+    out.no_results_reason = "UNSUPPORTED_CHAIN";
+    out.status = "unsupported_chain";
+    out.token_symbol = asset.symbol;
+    out.detected_chain = asset.platform_display_name ?? asset.chain ?? "unknown";
+    out.supported_chains = [...SUPPORTED_CHAINS];
+    out.message = `Token runs on ${out.detected_chain}. Currently supported chains are: ${SUPPORTED_CHAINS.join(", ")}.`;
     return out;
   }
 

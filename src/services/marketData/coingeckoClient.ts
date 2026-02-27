@@ -20,6 +20,8 @@ export interface CoinGeckoMarketData {
   address: string | null;
   /** When address is set, the chain that address belongs to (priority: ethereum → bsc → arbitrum). */
   platform_chain?: CoinGeckoSupportedChain | null;
+  /** First platform key from CoinGecko (e.g. solana, bitcoin) when token has platforms; for display when platform_chain is null. */
+  platform_key?: string | null;
   circulatingSupply: number | null;
   marketCapUsd: number | null;
   volume24hUsd: number | null;
@@ -239,6 +241,7 @@ export async function fetchCoinGeckoData(symbol: string): Promise<CoinGeckoMarke
   return {
     address,
     platform_chain: address ? platform_chain ?? null : null,
+    platform_key: firstPlatform ? firstPlatform.key : null,
     circulatingSupply,
     marketCapUsd,
     volume24hUsd,

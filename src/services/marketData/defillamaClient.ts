@@ -34,7 +34,7 @@ function toFinite(x: unknown): number | null {
  * Fetch liquidity (volume * price) for a token from DeFiLlama. Returns null on failure.
  */
 export async function fetchDefiLlamaLiquidity(
-  chain: "ethereum" | "bsc" | "arbitrum",
+  chain: "ethereum" | "bsc" | "arbitrum" | "base",
   address: string
 ): Promise<DefiLlamaLiquidityData | null> {
   const addr = (address.startsWith("0x") ? address : "0x" + address).toLowerCase();

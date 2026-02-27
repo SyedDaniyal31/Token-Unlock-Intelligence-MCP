@@ -21,7 +21,7 @@ function throwIfAborted(signal: AbortSignal | undefined, deadline: number | unde
 }
 
 export interface HolderDistributionInput {
-  chain: "ethereum" | "bsc" | "arbitrum";
+  chain: "ethereum" | "bsc" | "arbitrum" | "base";
   tokenAddress: string;
   totalSupply: number;
   /** Optional: from getMarketEnrichment for heuristic when no holder API. */

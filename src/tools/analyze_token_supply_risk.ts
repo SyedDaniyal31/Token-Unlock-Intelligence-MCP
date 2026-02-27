@@ -13,6 +13,7 @@ import { detectVestingCliffs } from "../core/vestingAnalyzer.js";
 import { analyzeEmissionPattern } from "../core/emissionModel.js";
 import { computeLiquidityStress } from "../core/liquidityAnalyzer.js";
 import { computeSupplyRiskScore } from "../core/riskEngine.js";
+import { isChainSupported, SUPPORTED_CHAINS } from "../core/chainCapabilities.js";
 import { runDynamicSupplyEngine, defaultOutput } from "../services/dynamicSupply/index.js";
 import {
   buildForwardRiskWithUncertainty,
@@ -65,7 +66,7 @@ const ENGINE_VERSION = "1.2.0";
 export interface SupplyRiskInput {
   token_symbol: string;
   token_address?: string;
-  chain?: "ethereum" | "arbitrum" | "bsc";
+  chain?: "ethereum" | "arbitrum" | "bsc" | "base";
   timeframe_days?: number;
   /** When provided, run market shock simulation and include simulation_outcome. */
   simulation_params?: {
@@ -120,7 +121,7 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
   /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
@@ -159,9 +160,19 @@ export interface SupplyRiskOutputFlat {
   data_freshness_seconds: number;
 }
 
+/** Structured response when chain is not supported (ethereum, bsc, arbitrum, base only). */
+export interface UnsupportedChainData {
+  status: "unsupported_chain";
+  token_symbol: string;
+  detected_chain: string;
+  supported_chains: string[];
+  analysis_scope: "unsupported";
+  message: string;
+}
+
 export interface SupplyRiskOutput {
   success: true;
-  data: SupplyRiskOutputFlat;
+  data: SupplyRiskOutputFlat | UnsupportedChainData;
 }
 
 export interface SupplyRiskError {
@@ -401,7 +412,7 @@ export async function runAnalyzeTokenSupplyRisk(
   const analysisTimestamp = new Date().toISOString();
   let symbol = str(input.token_symbol).trim().toUpperCase();
   let tokenAddress = str(input.token_address).trim();
-  let chainSlug = input.chain === "ethereum" || input.chain === "arbitrum" || input.chain === "bsc" ? input.chain : undefined;
+  let chainSlug = (input.chain && isChainSupported(input.chain)) ? input.chain as "ethereum" | "arbitrum" | "bsc" | "base" : undefined;
 
   const cacheParams: SupplyRiskCacheParams = {
     token_symbol: (symbol || input.token_symbol?.trim()) ?? "",
@@ -448,6 +459,22 @@ export async function runAnalyzeTokenSupplyRisk(
     chain: chainSlug,
   });
 
+  // Chain capability gate: only ethereum, bsc, arbitrum, base. No unlock or RPC for others.
+  if (!isChainSupported(asset.chain)) {
+    const detectedChain = asset.platform_display_name ?? asset.chain ?? "unknown";
+    return {
+      success: true,
+      data: {
+        status: "unsupported_chain",
+        token_symbol: asset.symbol,
+        detected_chain: detectedChain,
+        supported_chains: [...SUPPORTED_CHAINS],
+        analysis_scope: "unsupported",
+        message: `Token runs on ${detectedChain}. Currently supported chains are: ${SUPPORTED_CHAINS.join(", ")}.`,
+      },
+    };
+  }
+
   // STEP 2 — Non-EVM path: unlock data only (no RPC). Fetch unlock here; engine not used.
   if (!asset.supported) {
     const unlockData = await fetchUnlockData(asset);
@@ -473,7 +500,7 @@ export async function runAnalyzeTokenSupplyRisk(
 
   symbol = asset.symbol;
   tokenAddress = asset.contract_address ?? tokenAddress;
-  chainSlug = asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" ? asset.chain : undefined;
+  chainSlug = isChainSupported(asset.chain) ? (asset.chain as "ethereum" | "bsc" | "arbitrum" | "base") : undefined;
 
   // STEP 3 — Dynamic (EVM) path: engine runs Unlock → Onchain → Risk → Fusion; enrichment handled inside engine.
   if (tokenAddress && chainSlug) {
@@ -501,6 +528,28 @@ export async function runAnalyzeTokenSupplyRisk(
         clearTimeout(timeoutId);
       }
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
+      // Unsupported chain: return structured response without running unlock/RPC.
+      if (result.analysis_scope === "unsupported" && (result as { status?: string }).status === "unsupported_chain") {
+        const unsupported = result as {
+          status: "unsupported_chain";
+          token_symbol?: string;
+          detected_chain?: string;
+          supported_chains?: string[];
+          analysis_scope: "unsupported";
+          message?: string;
+        };
+        return {
+          success: true,
+          data: {
+            status: unsupported.status,
+            token_symbol: unsupported.token_symbol ?? symbol ?? tokenAddress ?? "unknown",
+            detected_chain: unsupported.detected_chain ?? "unknown",
+            supported_chains: unsupported.supported_chains ?? [],
+            analysis_scope: unsupported.analysis_scope,
+            message: unsupported.message ?? "",
+          },
+        };
+      }
       const full: SupplyRiskOutputFlat = {
         ...result,
         unlock_schedule_status: result.next_estimated_unlock_timestamp != null ? "active" : "completed",

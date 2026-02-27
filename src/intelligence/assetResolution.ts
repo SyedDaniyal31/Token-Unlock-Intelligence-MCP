@@ -6,7 +6,7 @@
 import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
 import { resolveTokenBySymbol, createUnlockTokenRegistry, SUPPORTED_CHAINS } from "../utils/tokenResolver.js";
 
-export type ChainSlug = "ethereum" | "bsc" | "arbitrum" | "unsupported";
+export type ChainSlug = "ethereum" | "bsc" | "arbitrum" | "base" | "unsupported";
 
 export interface DataSourcesAvailable {
   rpc: boolean;
@@ -22,6 +22,8 @@ export interface AssetResolutionResult {
   data_sources_available: DataSourcesAvailable;
   /** Normalized symbol (e.g. from CoinGecko or registry). */
   symbol: string;
+  /** Human-readable platform name when chain is unsupported (e.g. solana, bitcoin); for display only. */
+  platform_display_name?: string;
 }
 
 const SUPPORTED_SET = new Set<string>(SUPPORTED_CHAINS);
@@ -59,7 +61,7 @@ export async function resolveAsset(input: {
   // Caller already provided EVM address + chain
   if (inputAddress && inputChain) {
     const slug: ChainSlug =
-      inputChain === "ethereum" || inputChain === "bsc" || inputChain === "arbitrum"
+      inputChain === "ethereum" || inputChain === "bsc" || inputChain === "arbitrum" || inputChain === "base"
         ? (inputChain as ChainSlug)
         : "unsupported";
     const isSupportedEvm = slug !== "unsupported";
@@ -86,9 +88,13 @@ export async function resolveAsset(input: {
     const platformChain = cgData.platform_chain ?? null;
     const slug = platformChain != null ? normalizeCoinGeckoChainToSlug(platformChain) : undefined;
     const chain: ChainSlug =
-      slug === "ethereum" || slug === "bsc" || slug === "arbitrum" ? slug : "unsupported";
+      slug === "ethereum" || slug === "bsc" || slug === "arbitrum" || slug === "base" ? slug : "unsupported";
     const isEvm = chain !== "unsupported";
     const is_native_asset = !address && (platformChain == null || !isEvm);
+    const platform_display_name =
+      chain === "unsupported" && cgData.platform_key
+        ? String(cgData.platform_key).toLowerCase().trim()
+        : undefined;
 
     return {
       chain_type: isEvm ? "evm" : "non_evm",
@@ -97,6 +103,7 @@ export async function resolveAsset(input: {
       is_native_asset,
       data_sources_available: dataSourcesForEvm(chain),
       symbol: symbol || "UNKNOWN",
+      platform_display_name,
     };
   }
 

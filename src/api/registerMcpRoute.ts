@@ -92,8 +92,8 @@ const MCP_TOOLS = [
         token_address: { type: "string" as const, description: "Contract address for dynamic analysis (use with chain)" },
         chain: {
           type: "string" as const,
-          enum: ["ethereum", "arbitrum", "bsc"] as const,
-          description: "Chain to analyze; required when using token_address",
+          enum: ["ethereum", "arbitrum", "bsc", "base"] as const,
+          description: "Chain to analyze; required when using token_address. Supported: ethereum, bsc, arbitrum, base.",
         },
         timeframe_days: { type: "number" as const, description: "Analysis window in days; default 30" },
         simulation_params: {
@@ -185,8 +185,8 @@ const MCP_TOOLS = [
         pattern_confidence_score: { type: "number" as const },
         analysis_scope: {
           type: "string" as const,
-          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient"] as const,
-          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, or legacy dynamic/registry/hybrid.",
+          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient", "unsupported"] as const,
+          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, unsupported (chain not supported), or legacy dynamic/registry/hybrid.",
         },
         analysis_provenance: {
           type: "object" as const,
@@ -551,7 +551,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const patternConf = o.pattern_confidence_score;
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
-  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain";
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain" || scope === "unlock_only" || scope === "combined" || scope === "supply_only" || scope === "insufficient" || scope === "unsupported";
   const provenance = o.analysis_provenance;
   const validProvenance =
     provenance == null ||
@@ -722,16 +722,21 @@ async function handleAnalyzeTokenUnlock(
           ),
         ]);
         if (supplyResult.success && supplyResult.data) {
-          const report = supplyRiskToUnlockReport(supplyResult.data);
-          const result = toUnlockResult(report);
-          if (!isValidUnlockResult(result)) {
-            return jsonRpcError(id, -32603, "Internal result validation failed.");
+          const data = supplyResult.data as { status?: string };
+          if (data.status === "unsupported_chain") {
+            // Skip unlock report for unsupported chain response.
+          } else {
+            const report = supplyRiskToUnlockReport(supplyResult.data as SupplyRiskOutputFlat);
+            const result = toUnlockResult(report);
+            if (!isValidUnlockResult(result)) {
+              return jsonRpcError(id, -32603, "Internal result validation failed.");
+            }
+            logger.info(
+              { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "dynamic" },
+              "MCP callTool success (dynamic fallback)"
+            );
+            return jsonRpcSuccess(id, result);
           }
-          logger.info(
-            { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "dynamic" },
-            "MCP callTool success (dynamic fallback)"
-          );
-          return jsonRpcSuccess(id, result);
         }
       }
     }
@@ -744,7 +749,7 @@ async function handleAnalyzeTokenUnlock(
   const platformChain = cgData?.platform_chain ?? null;
   if (!hasCgData && !hasAddress && platformChain === null) {
     const asset = await resolveAsset({ symbol: symbolToResolve });
-    if (asset.supported && asset.contract_address && (asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum")) {
+    if (asset.supported && asset.contract_address && (asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" || asset.chain === "base")) {
       try {
         const supplyResult = await Promise.race([
           runAnalyzeTokenSupplyRisk(
@@ -756,16 +761,21 @@ async function handleAnalyzeTokenUnlock(
           ),
         ]);
         if (supplyResult.success && supplyResult.data) {
-          const report = supplyRiskToUnlockReport(supplyResult.data);
-          const result = toUnlockResult(report);
-          if (!isValidUnlockResult(result)) {
-            return jsonRpcError(id, -32603, "Internal result validation failed.");
+          const data = supplyResult.data as { status?: string };
+          if (data.status === "unsupported_chain") {
+            // Skip unlock report for unsupported chain response.
+          } else {
+            const report = supplyRiskToUnlockReport(supplyResult.data as SupplyRiskOutputFlat);
+            const result = toUnlockResult(report);
+            if (!isValidUnlockResult(result)) {
+              return jsonRpcError(id, -32603, "Internal result validation failed.");
+            }
+            logger.info(
+              { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "resolveAsset" },
+              "MCP callTool success (resolveAsset fallback)"
+            );
+            return jsonRpcSuccess(id, result);
           }
-          logger.info(
-            { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "resolveAsset" },
-            "MCP callTool success (resolveAsset fallback)"
-          );
-          return jsonRpcSuccess(id, result);
         }
       } catch (err) {
         logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: resolveAsset supply risk fallback failed");
@@ -811,7 +821,7 @@ async function handleAnalyzeTokenUnlock(
     { symbol: symbolToResolve, hasCgData, hasAddress, platform_chain: platformChain },
     "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"
   );
-  return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, or arbitrum");
+  return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, arbitrum, or base.");
 }
 
 async function handleAnalyzeTokenSupplyRisk(
@@ -820,9 +830,9 @@ async function handleAnalyzeTokenSupplyRisk(
   args: Record<string, unknown>,
   deps: UnlockIntelligenceDeps
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
-  type ChainSlug = "ethereum" | "arbitrum" | "bsc";
+  type ChainSlug = "ethereum" | "arbitrum" | "bsc" | "base";
   let chainSlug: ChainSlug | undefined =
-    args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" ? (args.chain as ChainSlug) : undefined;
+    (args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" || args.chain === "base") ? (args.chain as ChainSlug) : undefined;
   const timeframeDays = typeof args.timeframe_days === "number" ? args.timeframe_days : undefined;
   let tokenAddress = typeof args.token_address === "string" ? args.token_address.trim() : undefined;
   logger.info({ token: token || undefined, token_address: tokenAddress, chain: chainSlug }, "SUPPLY_HANDLER_ENTERED");
@@ -874,6 +884,12 @@ async function handleAnalyzeTokenSupplyRisk(
       return normalizeSupplyRiskResult(completedNoData, id);
     }
     const data = result.data;
+    // Unsupported chain response: pass through without full schema validation.
+    const unsupported = data as { status?: string; analysis_scope?: string };
+    if (unsupported.status === "unsupported_chain" && unsupported.analysis_scope === "unsupported") {
+      logger.info("SUPPLY_HANDLER_RETURNING_UNSUPPORTED_CHAIN");
+      return normalizeSupplyRiskResult(data, id);
+    }
     if (!isValidSupplyRiskResult(data)) {
       logger.warn("SUPPLY_VALIDATION_FAILED");
       const softFailure = buildSoftFailureSupplyRisk(

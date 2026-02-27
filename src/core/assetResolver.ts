@@ -7,7 +7,7 @@
 import logger from "./logger.js";
 import { resolveAsset as resolveAssetIntelligence } from "../intelligence/assetResolution.js";
 
-export type ChainSlug = "ethereum" | "bsc" | "arbitrum" | "unsupported";
+export type ChainSlug = "ethereum" | "bsc" | "arbitrum" | "base" | "unsupported";
 
 export interface AssetMetadata {
   symbol: string;
@@ -15,18 +15,20 @@ export interface AssetMetadata {
   chain: ChainSlug;
   contract_address: string | null;
   is_native_asset: boolean;
-  /** True when chain_type === "evm" and chain is ethereum | bsc | arbitrum. */
+  /** True when chain_type === "evm" and chain is ethereum | bsc | arbitrum | base. */
   supported: boolean;
   /** True when intelligence returned null (symbol not in CoinGecko/registry/KNOWN_EVM). Distinguishes "unresolved" from "resolved native". */
   unresolved?: boolean;
+  /** Human-readable platform name when chain is unsupported (e.g. solana, bitcoin); for display only. */
+  platform_display_name?: string;
 }
 
-const SUPPORTED_CHAINS: ChainSlug[] = ["ethereum", "bsc", "arbitrum"];
+const SUPPORTED_CHAINS: ChainSlug[] = ["ethereum", "bsc", "arbitrum", "base"];
 const SUPPORTED_SET = new Set<string>(SUPPORTED_CHAINS);
 
 /**
  * Resolve and classify asset. Never throws; returns metadata with supported = false on failure.
- * If token_address and chain (ethereum|bsc|arbitrum) are provided, returns EVM immediately without CoinGecko.
+ * If token_address and chain (ethereum|bsc|arbitrum|base) are provided, returns EVM immediately without CoinGecko.
  */
 export async function resolveAsset(input: {
   symbol: string;
@@ -37,7 +39,7 @@ export async function resolveAsset(input: {
   const token_address = (input.token_address ?? "").trim();
   const chainRaw = (input.chain ?? "").trim().toLowerCase();
   const chainSlug: ChainSlug =
-    chainRaw === "ethereum" || chainRaw === "bsc" || chainRaw === "arbitrum" ? chainRaw : "unsupported";
+    chainRaw === "ethereum" || chainRaw === "bsc" || chainRaw === "arbitrum" || chainRaw === "base" ? chainRaw : "unsupported";
 
   // STEP 1 — token_address + supported chain → always EVM; do not depend on CoinGecko
   if (token_address && chainSlug !== "unsupported") {
@@ -130,6 +132,7 @@ export async function resolveAsset(input: {
     is_native_asset: result.is_native_asset,
     supported,
     unresolved: false,
+    platform_display_name: result.platform_display_name,
   };
   logger.info(
     { symbol: resolved.symbol, chain_type: resolved.chain_type, chain: resolved.chain, supported: resolved.supported },

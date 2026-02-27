@@ -32,7 +32,7 @@ function toNum(x: number | null | undefined): number {
  */
 export async function getMarketEnrichment(
   symbol: string,
-  chain: "ethereum" | "bsc" | "arbitrum",
+  chain: "ethereum" | "bsc" | "arbitrum" | "base",
   address: string | null,
   executionNowMs: number
 ): Promise<MarketEnrichment | null> {

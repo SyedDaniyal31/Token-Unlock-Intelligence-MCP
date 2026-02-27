@@ -7,7 +7,7 @@
 
 import type { ChainProvider, RawChainLog, RawChainBlock } from "../../core/types.js";
 
-export type UnlockScannerChain = "ethereum" | "bsc" | "arbitrum";
+export type UnlockScannerChain = "ethereum" | "bsc" | "arbitrum" | "base";
 
 export interface NormalizedLog {
   blockNumber: number;
@@ -41,7 +41,9 @@ export function getRpcUrl(chain: UnlockScannerChain): string | null {
         ? process.env.BSC_RPC_URL
         : chain === "arbitrum"
           ? process.env.ARB_RPC_URL
-          : undefined;
+          : chain === "base"
+            ? process.env.BASE_RPC_URL
+            : undefined;
 
   if (!url || typeof url !== "string" || url.trim() === "") {
     return null;
@@ -172,6 +174,8 @@ function getChainId(chain: string): number {
       return 56;
     case "arbitrum":
       return 42161;
+    case "base":
+      return 8453;
     default:
       throw new Error(`Unsupported chain: ${chain}`);
   }
