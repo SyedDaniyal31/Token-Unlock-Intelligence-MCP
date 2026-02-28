@@ -121,12 +121,12 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "calendar_only";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "scheduled_unlock";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
   /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
   unlock_provider?: string;
-  /** Unlock provider confidence 0–1. */
+  /** Internal: unlock weighting (0–1). Not exposed to users. */
   unlock_provider_confidence?: number;
   /** Optional enrichment (market_cap_usd, volume_24h_usd, liquidity_usd, unlock_amount_usd, unlock_market_cap_impact). */
   market_cap_usd?: number;
@@ -342,7 +342,7 @@ export function buildStructuredNoDataSupplyRisk(
 
 /**
  * Build supply risk result for unsupported chains when ManualRegistry has unlock data.
- * analysis_scope: "calendar_only"; no RPC, holder analysis, or liquidity checks.
+ * analysis_scope: "scheduled_unlock"; no RPC, holder analysis, or liquidity checks.
  */
 function buildCalendarOnlySupplyRisk(
   token_symbol: string,
@@ -356,10 +356,10 @@ function buildCalendarOnlySupplyRisk(
   analysisTimestamp: string
 ): SupplyRiskOutputFlat {
   const base = buildUnlockOnlySupplyRisk(token_symbol, unlockData, analysisTimestamp);
-  base.analysis_scope = "calendar_only";
+  base.analysis_scope = "scheduled_unlock";
   base.risk_flags = (base.risk_flags ?? []).includes("UNLOCK_SCHEDULE")
-    ? ["UNLOCK_SCHEDULE", "CALENDAR_ONLY"]
-    : ["CALENDAR_ONLY"];
+    ? ["UNLOCK_SCHEDULE", "SCHEDULED_UNLOCK"]
+    : ["SCHEDULED_UNLOCK"];
   return base;
 }
 

@@ -125,6 +125,10 @@ function roundToInteger(value: number): number {
   return Math.round(value);
 }
 
+/**
+ * Build risk summary with structured tone: event magnitude, market impact,
+ * liquidity absorption risk, volatility expectation. No defensive hedging.
+ */
 function buildRiskSummary(
   input: ImpactInput,
   output: ImpactOutput
@@ -140,14 +144,34 @@ function buildRiskSummary(
   const regime = input.market_regime;
 
   switch (output.risk_level) {
-    case "Low":
-      return `Unlock represents ${pctCirc}% of circulating supply and ${ratioRounded}x daily volume. ${cohortLabel} allocation. Historical unlocks have not produced sustained downside. Market liquidity sufficient to absorb supply. Limited short-term volatility implication.`;
-    case "Medium":
-      return `Unlock represents ${pctCirc}% of circulating supply and ${ratioRounded}x daily volume. ${cohortLabel} allocation. Post-unlock 7d return history: ${hist7d}%. ${regime} regime. Moderate short-term volatility possible.`;
-    case "High":
-      return `Upcoming unlock equals ${ratioRounded}x daily trading volume and ${pctCirc}% of circulating supply. Previous unlocks resulted in average ${hist7d}% 7d returns. ${cohortLabel} allocation with elevated profit-taking incentive. Elevated short-term downside risk.`;
-    case "Extreme":
-      return `Unlock exceeds ${ratioRounded}x daily volume and ${pctCirc}% of free float. Historical pattern shows repeated post-unlock drawdowns (avg 7d: ${hist7d}%). ${cohortLabel} cohort. Occurring in ${regime} macro regime. High probability of liquidity-driven repricing.`;
+    case "Low": {
+      const magnitude = `Unlock represents ${pctCirc}% of circulating supply and ${ratioRounded}x daily volume. ${cohortLabel} allocation.`;
+      const marketImpact = "Historical unlocks have not produced sustained downside.";
+      const liquidity = "Market liquidity sufficient to absorb supply.";
+      const volatility = "Low volatility expected around unlock window.";
+      return `${magnitude} ${marketImpact} ${liquidity} ${volatility}`;
+    }
+    case "Medium": {
+      const magnitude = `Unlock represents ${pctCirc}% of circulating supply and ${ratioRounded}x daily volume. ${cohortLabel} allocation.`;
+      const marketImpact = `Post-unlock 7d return history: ${hist7d}%. ${regime} regime.`;
+      const liquidity = "Market liquidity can absorb typical unlock volume.";
+      const volatility = "Moderate volatility expected around unlock.";
+      return `${magnitude} ${marketImpact} ${liquidity} ${volatility}`;
+    }
+    case "High": {
+      const magnitude = `Upcoming unlock equals ${ratioRounded}x daily trading volume and ${pctCirc}% of circulating supply.`;
+      const marketImpact = `Previous unlocks resulted in average ${hist7d}% 7d returns. ${cohortLabel} allocation with elevated profit-taking incentive.`;
+      const liquidity = "Liquidity may be strained during unlock window.";
+      const volatility = "Elevated short-term downside risk.";
+      return `${magnitude} ${marketImpact} ${liquidity} ${volatility}`;
+    }
+    case "Extreme": {
+      const magnitude = `Unlock exceeds ${ratioRounded}x daily volume and ${pctCirc}% of free float.`;
+      const marketImpact = `Historical pattern shows repeated post-unlock drawdowns (avg 7d: ${hist7d}%). ${cohortLabel} cohort. ${regime} macro regime.`;
+      const liquidity = "High probability of liquidity-driven repricing.";
+      const volatility = "High volatility expected around unlock.";
+      return `${magnitude} ${marketImpact} ${liquidity} ${volatility}`;
+    }
     default: {
       const _: never = output.risk_level;
       return "";

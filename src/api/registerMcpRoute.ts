@@ -66,7 +66,7 @@ const MCP_TOOLS = [
   {
     name: UNLOCK_TOOL_NAME,
     description:
-      "Token unlock risk analysis for ETH, BSC, Arbitrum, Base. Checks manual registry for unlock schedule (date, amount, %), fetches CoinGecko price, runs risk analysis. Returns supply inflation %, unlock pressure, risk score.",
+      "Token unlock risk analysis for ETH, BSC, Arbitrum, Base. Uses scheduled token release events and market data. Returns supply inflation %, unlock pressure, risk score.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -180,8 +180,8 @@ const MCP_TOOLS = [
         pattern_confidence_score: { type: "number" as const },
         analysis_scope: {
           type: "string" as const,
-          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient", "unsupported", "calendar_only"] as const,
-          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, unsupported (chain not supported), calendar_only (ManualRegistry for unsupported chain), or legacy dynamic/registry/hybrid.",
+          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient", "unsupported", "scheduled_unlock"] as const,
+          description: "Scope of analysis: combined, unlock_only, supply_only, insufficient, unsupported, or scheduled_unlock.",
         },
         analysis_provenance: {
           type: "object" as const,
@@ -247,19 +247,6 @@ const MCP_TOOLS = [
         confidence_score: {
           type: "number" as const,
           description: "Confidence in inferred unlock metrics (0–100).",
-        },
-        unlock_data_source: {
-          type: "string" as const,
-          enum: ["registry", "external_calendar", "scanner", "inferred"] as const,
-          description: "Unlock intelligence source: registry > external_calendar > scanner > inferred.",
-        },
-        unlock_provider: {
-          type: "string" as const,
-          description: "Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama) when unlock data was used.",
-        },
-        unlock_provider_confidence: {
-          type: "number" as const,
-          description: "Unlock provider confidence 0–1; used to weight unlock in SSI.",
         },
         supply_shock_index: {
           type: "number" as const,
@@ -403,6 +390,60 @@ function normalizeSupplyRiskResult(
   return jsonRpcSuccess(id, softFailure);
 }
 
+/** Generic analysis summary; never expose storage layer or internal data sources. */
+const ANALYSIS_SUMMARY = "This analysis reflects scheduled token release events and their projected market impact.";
+
+/**
+ * Build unlock event narrative from supply_unlock_percent (0–1) and next unlock timestamp.
+ * Uses magnitude-based wording: extreme (≥20%), significant (≥10%), or generic fallback.
+ */
+function buildUnlockEventNarrative(
+  supplyUnlockPercent: number | undefined,
+  nextUnlockTimestamp: number | null | undefined
+): string {
+  const pct = typeof supplyUnlockPercent === "number" && Number.isFinite(supplyUnlockPercent) ? supplyUnlockPercent : 0;
+  const ts = typeof nextUnlockTimestamp === "number" && Number.isFinite(nextUnlockTimestamp) ? nextUnlockTimestamp : null;
+
+  if (pct >= 0.2 && ts != null) {
+    const percent = Math.round(pct * 100);
+    const formattedDate = new Date(ts * 1000).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    return `An extreme supply expansion event of ${percent}% of total supply is scheduled for ${formattedDate}. Events of this magnitude typically increase volatility and short-term sell-side pressure.`;
+  }
+  if (pct >= 0.1 && ts != null) {
+    const percent = Math.round(pct * 100);
+    const formattedDate = new Date(ts * 1000).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+    return `A significant supply expansion event of ${percent}% of total supply is scheduled for ${formattedDate}. Events of this magnitude typically increase volatility and short-term sell-side pressure.`;
+  }
+  return ANALYSIS_SUMMARY;
+}
+
+/**
+ * Sanitize user-facing output: remove internal references (Manual Registry, calendar-only, provider names, confidence).
+ */
+function sanitizeUserFacingOutput(obj: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...obj };
+  delete out.unlock_provider;
+  delete out.unlock_provider_confidence;
+  delete out.unlock_data_source;
+  if (out.analysis_scope === "calendar_only") out.analysis_scope = "scheduled_unlock";
+  if (Array.isArray(out.risk_flags)) {
+    out.risk_flags = (out.risk_flags as string[]).filter((f) => f !== "CALENDAR_ONLY");
+  }
+  out.analysis_summary = buildUnlockEventNarrative(
+    out.supply_unlock_percent as number | undefined,
+    out.next_estimated_unlock_timestamp as number | null | undefined
+  );
+  return out;
+}
+
 /**
  * Ensure JSON-RPC result is always a flat object for Context (never [], null, or { success, data }).
  * Call before safeSend so Context receives result: { flat object }.
@@ -426,6 +467,9 @@ function ensureFlatResultPayload(
       inner != null && typeof inner === "object" && !Array.isArray(inner)
         ? inner
         : buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
+  }
+  if (typeof (response as JsonRpcSuccess).result === "object" && (response as JsonRpcSuccess).result != null && !Array.isArray((response as JsonRpcSuccess).result)) {
+    (response as JsonRpcSuccess).result = sanitizeUserFacingOutput((response as JsonRpcSuccess).result as Record<string, unknown>);
   }
   return response;
 }
@@ -555,7 +599,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const patternConf = o.pattern_confidence_score;
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
-  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain" || scope === "unlock_only" || scope === "combined" || scope === "supply_only" || scope === "insufficient" || scope === "unsupported" || scope === "calendar_only";
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain" || scope === "unlock_only" || scope === "combined" || scope === "supply_only" || scope === "insufficient" || scope === "unsupported" || scope === "scheduled_unlock";
   const provenance = o.analysis_provenance;
   const validProvenance =
     provenance == null ||
@@ -674,8 +718,8 @@ function supplyRiskToUnlockReport(data: SupplyRiskOutputFlat): {
 }
 
 /**
- * Unified flow: 1) Check manual registry 2) CoinGecko for price/chain 3) Risk analysis.
- * Supports ETH, BSC, ARB, Base. Manual registry checked first; calendar-only for non-EVM when registry has data.
+ * Unified flow: 1) Scheduled unlock data 2) CoinGecko for price/chain 3) Risk analysis.
+ * Supports ETH, BSC, ARB, Base. Uses scheduled release events; supports non-EVM when unlock data is available.
  */
 async function handleAnalyzeTokenUnlock(
   id: string | number | null,
@@ -688,7 +732,7 @@ async function handleAnalyzeTokenUnlock(
   }
 
   try {
-    // Single path: runAnalyzeTokenSupplyRisk checks manual registry first, then CoinGecko, then full analysis
+    // Single path: runAnalyzeTokenSupplyRisk uses scheduled unlock data, CoinGecko, then full analysis
     const supplyResult = await Promise.race([
       runAnalyzeTokenSupplyRisk({ token_symbol: symbolNorm }, deps),
       new Promise<never>((_, reject) =>
@@ -709,7 +753,7 @@ async function handleAnalyzeTokenUnlock(
     }
 
     const data = supplyResult.data as SupplyRiskOutputFlat & { status?: string; analysis_scope?: string };
-    if (data.status === "unsupported_chain" && data.analysis_scope !== "calendar_only") {
+    if (data.status === "unsupported_chain" && data.analysis_scope !== "scheduled_unlock") {
       const unsupported = data as { message?: string; detected_chain?: string };
       return jsonRpcSuccess(id, {
         supported: false,

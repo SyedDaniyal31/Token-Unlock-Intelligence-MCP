@@ -119,7 +119,7 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "calendar_only";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "scheduled_unlock";
   /** Set when chain is not in supported list (ethereum, bsc, arbitrum, base). */
   status?: "unsupported_chain";
   token_symbol?: string;
@@ -128,7 +128,7 @@ export interface DynamicSupplyOutput {
   message?: string;
   /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
   unlock_provider?: string;
-  /** Unlock provider confidence 0–1. */
+  /** Internal: unlock weighting (0–1). Not exposed to users. */
   unlock_provider_confidence?: number;
   /** Set when unlock provider returned 429 (e.g. provider_rate_limited). */
   data_availability_status?: string;
@@ -443,7 +443,16 @@ export async function runDynamicSupplyEngine(
       unlock_timestamp: e.unlock_timestamp,
       amount: String(e.unlock_amount),
     }));
-    nextUnlockTs = unlockData.next_unlock_timestamp ?? null;
+    const now = Math.floor(executionNowMs / 1000);
+    const futureUnlocks = unlockIntelEvents
+      .filter((e) => e.unlock_timestamp > now)
+      .sort((a, b) => a.unlock_timestamp - b.unlock_timestamp);
+    const nextUnlock = futureUnlocks[0] ?? null;
+    nextUnlockTs = nextUnlock?.unlock_timestamp ?? null;
+    logger.info(
+      { next_estimated_unlock_timestamp: nextUnlockTs, future_count: futureUnlocks.length },
+      "NEXT_UNLOCK_SELECTED"
+    );
   } else if (unlockData.rate_limited === true) {
     providerUsed = unlockData.source ?? "DefiLlama";
   }
@@ -827,7 +836,7 @@ export async function runDynamicSupplyEngine(
     };
   }
 
-  // IMPORTANT: SSI must only reflect scheduled unlock pressure. Unlock term is 0 when ratio is 0 or provider confidence is 0.
+  // IMPORTANT: SSI must only reflect scheduled unlock pressure. Unlock term is 0 when ratio is 0 or weighting is 0.
   // Inferred distribution pressure is informational and must not inflate SSI.
   const ssi = computeSupplyShockFusion({
     unlock_pressure_ratio: out.unlock_pressure_ratio,
@@ -895,9 +904,17 @@ function buildCalendarOnlyOutput(
   const nowSec = Math.floor(executionNowMs / 1000);
   const events = unlockData.events ?? [];
   const eventCount = events.length;
-  const nextUnlockTs = unlockData.next_unlock_timestamp ?? (eventCount > 0 ? events[0].unlock_timestamp : null);
+  const futureUnlocks = events
+    .filter((e) => e.unlock_timestamp > nowSec)
+    .sort((a, b) => a.unlock_timestamp - b.unlock_timestamp);
+  const nextUnlock = futureUnlocks[0] ?? null;
+  const nextUnlockTs = nextUnlock?.unlock_timestamp ?? null;
+  logger.info(
+    { next_estimated_unlock_timestamp: nextUnlockTs, future_count: futureUnlocks.length },
+    "NEXT_UNLOCK_SELECTED"
+  );
   const volume30d = Math.max(0, volume30dUsd);
-  // Use unlock_percent from manual registry when available; else heuristic from event count
+  // Use unlock_percent from scheduled events when available; else heuristic from event count
   const unlockPctFromEvents = events
     .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent : 0))
     .filter((p) => p > 0);
@@ -920,7 +937,7 @@ function buildCalendarOnlyOutput(
   });
 
   const out = defaultOutput(1, volume30dUsd, nowSec, 0, 0, nowSec);
-  out.analysis_scope = "calendar_only";
+  out.analysis_scope = "scheduled_unlock";
   out.inflation_rate_30d = Number(Number(supplyInflationPct).toFixed(4));
   out.inflation_rate_90d = Number(Number(supplyInflationPct).toFixed(4));
   out.unlock_pressure_ratio = Number(Number(pressureRatioClean).toFixed(4));
@@ -943,7 +960,7 @@ function buildCalendarOnlyOutput(
     "SUPPLY_SHOCK_CLASSIFICATION_COMPUTED"
   );
   out.forward_risk_curve = forwardCurve;
-  out.risk_flags = pressureRatioClean > 0 ? ["UNLOCK_SCHEDULE", "CALENDAR_ONLY"] : ["CALENDAR_ONLY"];
+  out.risk_flags = pressureRatioClean > 0 ? ["UNLOCK_SCHEDULE", "SCHEDULED_UNLOCK"] : ["SCHEDULED_UNLOCK"];
   out.token_symbol = asset.symbol;
   out.unlock_provider = unlockData.source ?? "ManualRegistry";
   out.unlock_provider_confidence = unlockData.confidence_score ?? 0.9;
