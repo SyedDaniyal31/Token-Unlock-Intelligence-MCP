@@ -627,7 +627,8 @@ function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody):
   return response;
 }
 
-const TOOL_TIMEOUT_MS = 35_000;
+// Keep under typical HTTP/MCP client timeouts (~30s) so we return before Context gives up.
+const TOOL_TIMEOUT_MS = 25_000;
 
 export interface UnlockResultShape {
   unlock_pressure_ratio: number;
@@ -906,10 +907,11 @@ async function handleAnalyzeTokenUnlock(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, token_symbol: symbolNorm }, "MCP analyze_token_unlock error");
+    const isTimeout = message.includes("timed out");
     return jsonRpcError(
       id,
-      -32000,
-      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
+      isTimeout ? -32001 : -32000,
+      isTimeout ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
     );
   }
 }
