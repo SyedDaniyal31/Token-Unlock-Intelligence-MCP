@@ -1057,7 +1057,7 @@ function handleInitialize(id: string | number | null): JsonRpcSuccess {
 
 /**
  * Register SSE endpoint for MCP clients that expect text/event-stream (e.g. Context Protocol).
- * GET /mcp/sse and GET /sse return Content-Type: text/event-stream.
+ * GET /mcp, GET /mcp/sse, GET /sse return Content-Type: text/event-stream when Accept requests it.
  */
 function registerSseEndpoint(app: { get?: (path: string, ...handlers: RequestHandler[]) => void }): void {
   if (typeof app.get !== "function") return;
@@ -1083,6 +1083,18 @@ function registerSseEndpoint(app: { get?: (path: string, ...handlers: RequestHan
   };
   app.get("/mcp/sse", sseHandler);
   app.get("/sse", sseHandler);
+  app.get("/mcp", (req: Request, res: Response): void => {
+    const accept = (req.get("Accept") || "").toLowerCase();
+    if (accept.includes("text/event-stream")) {
+      sseHandler(req, res);
+      return;
+    }
+    res.status(200).json({
+      ok: true,
+      protocol: "mcp",
+      message: "POST JSON-RPC: initialize, listTools (or tools/list), callTool (or tools/call). SSE: GET /mcp/sse",
+    });
+  });
 }
 
 export function registerMcpRoute(

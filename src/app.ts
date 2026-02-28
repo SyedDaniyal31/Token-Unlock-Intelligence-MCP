@@ -37,11 +37,6 @@ const app = express();
 // Railway runs behind a single reverse proxy.
 // Required for express-rate-limit to correctly read X-Forwarded-For.
 app.set("trust proxy", 1);
-// Diagnostic: log all incoming requests (temporary for MCP route debugging)
-app.use((req, _res, next) => {
-  console.log("Incoming request:", req.method, req.url, "originalUrl:", req.originalUrl);
-  next();
-});
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(requestIdMiddleware);
@@ -53,7 +48,16 @@ registerMarketRoute(app);
 registerIntelligenceRoute(app, deps);
 registerRiskRoute(app, deps);
 
-app.get("/", (_req: Request, res: Response): void => {
+// Root handshake for Alex platform validation (expects text/event-stream at base URL)
+app.get("/", (req: Request, res: Response): void => {
+  const accept = (req.get("Accept") || "").toLowerCase();
+  if (accept.includes("text/event-stream")) {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.status(200).end();
+    return;
+  }
   res.status(200).json({
     name: "token-unlock-intelligence-mcp",
     status: "ok",
@@ -68,27 +72,8 @@ app.get("/", (_req: Request, res: Response): void => {
   });
 });
 
-app.get("/mcp", (req: Request, res: Response): void => {
-  const accept = (req.get("Accept") || "").toLowerCase();
-  if (accept.includes("text/event-stream")) {
-    res.redirect(302, "/mcp/sse");
-    return;
-  }
-  res.status(200).json({
-    ok: true,
-    protocol: "mcp",
-    message: "POST JSON-RPC: initialize, listTools (or tools/list), callTool (or tools/call). SSE: GET /mcp/sse",
-  });
-});
-
 const verifyContextAuth = createContextMiddleware();
 registerMcpRoute(app, deps, [verifyContextAuth]);
-
-// Diagnostic: catch unhandled POST routes (temporary for MCP route debugging)
-app.post("*", (req, res) => {
-  console.error("Unhandled POST route:", req.url, "originalUrl:", req.originalUrl);
-  res.status(404).json({ error: "Route not found", path: req.url, method: "POST" });
-});
 
 app.use(errorHandler);
 
