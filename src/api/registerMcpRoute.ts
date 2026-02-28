@@ -1086,7 +1086,7 @@ function registerSseEndpoint(app: { get?: (path: string, ...handlers: RequestHan
   app.get("/mcp", (req: Request, res: Response): void => {
     const accept = (req.get("Accept") || "").toLowerCase();
     if (accept.includes("text/event-stream")) {
-      sseHandler(req, res);
+      sseHandler(req, res, () => {});
       return;
     }
     res.status(200).json({
