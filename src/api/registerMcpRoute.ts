@@ -274,6 +274,30 @@ const MCP_TOOLS = [
           type: "string" as const,
           description: "Risk classification of inferred distribution pressure (e.g. MODERATE); only set when unlock_data_available is false.",
         },
+        unlock_event_assessment: {
+          type: "object" as const,
+          description: "Institutional-grade event severity block (primary output).",
+          properties: {
+            severity: { type: "string" as const, enum: ["EXTREME", "HIGH", "ELEVATED", "MODERATE"] as const },
+            unlock_percent_of_total_supply: { type: "number" as const },
+            unlock_amount: { type: ["number", "null"] as const },
+            unlock_date: { type: ["string", "null"] as const },
+            days_until_unlock: { type: ["number", "null"] as const },
+          },
+        },
+        market_impact_analysis: {
+          type: "object" as const,
+          description: "Market impact block: volume ratio, liquidity absorption, and market interpretation.",
+          properties: {
+            volume_ratio_days: { type: "number" as const },
+            liquidity_absorption_classification: { type: "string" as const, enum: ["LOW", "MODERATE", "HIGH"] as const },
+            market_interpretation: { type: "string" as const, description: "Professional interpretive statement on absorption, volatility, repricing." },
+          },
+        },
+        assessment_report: {
+          type: "string" as const,
+          description: "Formatted institutional report: Unlock Event Assessment + Market Impact Analysis.",
+        },
       },
       required: [
         "model_metadata",
@@ -390,58 +414,135 @@ function normalizeSupplyRiskResult(
   return jsonRpcSuccess(id, softFailure);
 }
 
-/** Generic analysis summary; never expose storage layer or internal data sources. */
-const ANALYSIS_SUMMARY = "This analysis reflects scheduled token release events and their projected market impact.";
+/** Severity classification from unlock percent (0–1). */
+function classifyEventSeverity(unlockPercent: number): "EXTREME" | "HIGH" | "ELEVATED" | "MODERATE" {
+  if (unlockPercent >= 0.25) return "EXTREME";
+  if (unlockPercent >= 0.1) return "HIGH";
+  if (unlockPercent >= 0.05) return "ELEVATED";
+  return "MODERATE";
+}
 
-/**
- * Build unlock event narrative from supply_unlock_percent (0–1) and next unlock timestamp.
- * Uses magnitude-based wording: extreme (≥20%), significant (≥10%), or generic fallback.
- */
-function buildUnlockEventNarrative(
-  supplyUnlockPercent: number | undefined,
-  nextUnlockTimestamp: number | null | undefined
-): string {
-  const pct = typeof supplyUnlockPercent === "number" && Number.isFinite(supplyUnlockPercent) ? supplyUnlockPercent : 0;
-  const ts = typeof nextUnlockTimestamp === "number" && Number.isFinite(nextUnlockTimestamp) ? nextUnlockTimestamp : null;
+/** Liquidity absorption from liquidity_stress_score (0–100). */
+function classifyLiquidityAbsorption(score: number): "LOW" | "MODERATE" | "HIGH" {
+  if (score <= 33) return "LOW";
+  if (score <= 66) return "MODERATE";
+  return "HIGH";
+}
 
-  if (pct >= 0.2 && ts != null) {
-    const percent = Math.round(pct * 100);
-    const formattedDate = new Date(ts * 1000).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-    return `An extreme supply expansion event of ${percent}% of total supply is scheduled for ${formattedDate}. Events of this magnitude typically increase volatility and short-term sell-side pressure.`;
-  }
-  if (pct >= 0.1 && ts != null) {
-    const percent = Math.round(pct * 100);
-    const formattedDate = new Date(ts * 1000).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-    return `A significant supply expansion event of ${percent}% of total supply is scheduled for ${formattedDate}. Events of this magnitude typically increase volatility and short-term sell-side pressure.`;
-  }
-  return ANALYSIS_SUMMARY;
+/** Human-readable date from Unix timestamp. */
+function formatEventDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
 }
 
 /**
- * Sanitize user-facing output: remove internal references (Manual Registry, calendar-only, provider names, confidence).
+ * Market interpretation from unlock percent (0–1). Professional language; absorption, volatility, repricing.
+ */
+function getMarketInterpretation(unlockPercent: number): string {
+  if (unlockPercent >= 0.2) {
+    return "Events of this magnitude often trigger short-term volatility spikes and directional repricing as new supply enters circulation.";
+  }
+  if (unlockPercent >= 0.1) {
+    return "Such events typically increase short-term liquidity demand and may pressure price if absorption capacity is limited.";
+  }
+  if (unlockPercent >= 0.05) {
+    return "Scheduled releases in this range may increase near-term liquidity demand; absorption capacity is the primary constraint on price impact.";
+  }
+  return "The scheduled release is unlikely to materially alter supply dynamics.";
+}
+
+/**
+ * Build institutional-grade unlock assessment output.
+ * Primary: Event Severity Block, Market Impact Analysis. Decisive tone. No confidence scores or internal flags.
+ */
+function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const now = Math.floor(Date.now() / 1000);
+  const supplyUnlockPct = typeof obj.supply_unlock_percent === "number" && Number.isFinite(obj.supply_unlock_percent as number)
+    ? (obj.supply_unlock_percent as number)
+    : 0;
+  const nextTs = typeof obj.next_estimated_unlock_timestamp === "number" && Number.isFinite(obj.next_estimated_unlock_timestamp as number)
+    ? (obj.next_estimated_unlock_timestamp as number)
+    : null;
+  const unlockPressureRatio = typeof obj.unlock_pressure_ratio === "number" && Number.isFinite(obj.unlock_pressure_ratio as number)
+    ? (obj.unlock_pressure_ratio as number)
+    : 0;
+  const liquidityStress = typeof obj.liquidity_stress_score === "number" && Number.isFinite(obj.liquidity_stress_score as number)
+    ? Math.max(0, Math.min(100, obj.liquidity_stress_score as number))
+    : 0;
+  const unlockAmountUsd = typeof obj.unlock_amount_usd === "number" && Number.isFinite(obj.unlock_amount_usd as number)
+    ? (obj.unlock_amount_usd as number)
+    : undefined;
+
+  const severity = classifyEventSeverity(supplyUnlockPct);
+  const magnitudePct = Number((supplyUnlockPct * 100).toFixed(1));
+  const eventDate = nextTs != null ? formatEventDate(nextTs) : null;
+  const daysUntilUnlock = nextTs != null ? Math.max(0, Math.ceil((nextTs - now) / 86400)) : null;
+  const volumeRatioDays = Number((unlockPressureRatio * 30).toFixed(1));
+  const liquidityAbsorption = classifyLiquidityAbsorption(liquidityStress);
+
+  out.unlock_event_assessment = {
+    severity,
+    unlock_percent_of_total_supply: magnitudePct,
+    unlock_amount: unlockAmountUsd ?? null,
+    unlock_date: eventDate,
+    days_until_unlock: daysUntilUnlock,
+  };
+
+  const marketInterpretation = getMarketInterpretation(supplyUnlockPct);
+
+  out.market_impact_analysis = {
+    volume_ratio_days: volumeRatioDays,
+    liquidity_absorption_classification: liquidityAbsorption,
+    market_interpretation: marketInterpretation,
+  };
+
+  const lines: string[] = [];
+  lines.push("=== Unlock Event Assessment ===");
+  lines.push(`Severity: ${severity}`);
+  lines.push(`Magnitude: ${magnitudePct}% of total supply`);
+  lines.push(`Event Date: ${eventDate ?? "—"}`);
+  lines.push(`Days Until Event: ${daysUntilUnlock != null ? `${daysUntilUnlock} days` : "—"}`);
+  lines.push("");
+  lines.push("=== Market Impact Analysis ===");
+  lines.push(`Unlock equals ${volumeRatioDays} days of average trading volume.`);
+  lines.push(`Liquidity absorption classified as ${liquidityAbsorption}.`);
+  lines.push("");
+  lines.push("=== Market Interpretation ===");
+  lines.push(marketInterpretation);
+
+  out.assessment_report = lines.join("\n");
+
+  if (supplyUnlockPct >= 0.2 && nextTs != null) {
+    out.analysis_summary = `A large supply expansion event of ${magnitudePct}% of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
+  } else if (supplyUnlockPct >= 0.1 && nextTs != null) {
+    out.analysis_summary = `A significant supply expansion event of ${magnitudePct}% of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
+  } else if (supplyUnlockPct >= 0.05) {
+    out.analysis_summary = `An elevated supply expansion event of ${magnitudePct}% of total supply is scheduled. ${marketInterpretation}`;
+  } else {
+    out.analysis_summary = `This analysis reflects scheduled token release events. ${marketInterpretation}`;
+  }
+
+  out.token_symbol = obj.token_symbol;
+  out.analysis_scope = obj.analysis_scope === "calendar_only" ? "scheduled_unlock" : obj.analysis_scope;
+  out.unlock_pressure_ratio = obj.unlock_pressure_ratio;
+  out.supply_shock_index = obj.supply_shock_index;
+  out.supply_shock_risk_tier = obj.supply_shock_risk_tier;
+  out.analysis_timestamp = obj.analysis_timestamp;
+  out.engine_version = obj.engine_version;
+
+  return out;
+}
+
+/**
+ * Sanitize user-facing output: institutional-grade format, remove internal references.
  */
 function sanitizeUserFacingOutput(obj: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...obj };
-  delete out.unlock_provider;
-  delete out.unlock_provider_confidence;
-  delete out.unlock_data_source;
-  if (out.analysis_scope === "calendar_only") out.analysis_scope = "scheduled_unlock";
-  if (Array.isArray(out.risk_flags)) {
-    out.risk_flags = (out.risk_flags as string[]).filter((f) => f !== "CALENDAR_ONLY");
-  }
-  out.analysis_summary = buildUnlockEventNarrative(
-    out.supply_unlock_percent as number | undefined,
-    out.next_estimated_unlock_timestamp as number | null | undefined
-  );
-  return out;
+  return buildInstitutionalOutput(obj);
 }
 
 /**
