@@ -101,7 +101,7 @@ export interface DynamicSupplyOutput {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "calendar_only";
   /** Set when chain is not in supported list (ethereum, bsc, arbitrum, base). */
   status?: "unsupported_chain";
   token_symbol?: string;
@@ -245,11 +245,19 @@ export async function runDynamicSupplyEngine(
     token_address: addr,
     chain: input.chain,
   });
-  if (!asset.supported) {
-    logger.info({ symbol: asset.symbol, chain_type: asset.chain_type }, "ASSET_UNSUPPORTED");
-    const out = defaultOutput(1, toNum(input.volume30dUsd), undefined, 0, 0, Math.floor(executionNowMs / 1000));
-    out.no_results_reason = "UNSUPPORTED_ASSET";
-    return out;
+
+  // ManualRegistry must ALWAYS be fetched before any chain gating. No early return before this.
+  const unlockData = await resolveUnlockData(asset);
+  throwIfAborted(signal);
+  logger.info({ symbol: asset.symbol }, "MANUAL_REGISTRY_CHECKED_BEFORE_CHAIN_GATE");
+
+  if (unlockData.success && unlockData.events.length > 0 && !isChainSupported(asset.chain)) {
+    // Calendar-based path: skip RPC, holder analysis, liquidity checks.
+    logger.info(
+      { symbol: asset.symbol, chain: asset.chain, source: unlockData.source },
+      "MANUAL_REGISTRY_OVERRIDE_UNSUPPORTED_CHAIN"
+    );
+    return buildCalendarOnlyOutput(asset, unlockData, toNum(input.volume30dUsd), executionNowMs);
   }
 
   if (!isChainSupported(asset.chain)) {
@@ -265,12 +273,19 @@ export async function runDynamicSupplyEngine(
     return out;
   }
 
+  if (!asset.supported) {
+    logger.info({ symbol: asset.symbol, chain_type: asset.chain_type }, "ASSET_UNSUPPORTED");
+    const out = defaultOutput(1, toNum(input.volume30dUsd), undefined, 0, 0, Math.floor(executionNowMs / 1000));
+    out.no_results_reason = "UNSUPPORTED_ASSET";
+    return out;
+  }
+
   let totalSupply = toNum(input.totalSupply);
   let decimals = 18;
   let supplySnapshotTs = Math.floor(executionNowMs / 1000);
   let blockNumberUsed = 0;
   let blockTimestampUsed = 0;
-  let unlockData: Awaited<ReturnType<typeof resolveUnlockData>> = { success: false, source: "none", events: [] };
+  // unlockData already set from resolveUnlockData above; reused for supported-chain flow.
 
   let supplyFromCache = false;
 
@@ -319,15 +334,12 @@ export async function runDynamicSupplyEngine(
         fromCache: false,
       };
     })();
-    const unlockPromise = resolveUnlockData(asset);
-
-    const [supplyResult, unlockDataFromAll] = await Promise.all([supplyPromise, unlockPromise]);
+    const supplyResult = await supplyPromise;
 
     totalSupply = supplyResult.totalSupply;
     decimals = supplyResult.decimals;
     supplySnapshotTs = supplyResult.supplySnapshotTs;
     supplyFromCache = supplyResult.fromCache;
-    unlockData = unlockDataFromAll;
 
     throwIfAborted(signal);
     if (blockNumberUsed > 0) {
@@ -814,6 +826,64 @@ function computeLiquidityStressScore(
   if (cliffPct > 5) s += 25;
   else if (cliffPct > 1) s += 10;
   return clamp(s, 0, 100);
+}
+
+/**
+ * Calendar-only output for unsupported chains when ManualRegistry has unlock data.
+ * No RPC calls; only unlock pressure metrics from calendar/provider data.
+ */
+function buildCalendarOnlyOutput(
+  asset: AssetMetadata,
+  unlockData: Awaited<ReturnType<typeof resolveUnlockData>>,
+  volume30dUsd: number,
+  executionNowMs: number
+): DynamicSupplyOutput {
+  const nowSec = Math.floor(executionNowMs / 1000);
+  const events = unlockData.events ?? [];
+  const eventCount = events.length;
+  const nextUnlockTs = unlockData.next_unlock_timestamp ?? (eventCount > 0 ? events[0].unlock_timestamp : null);
+  const volume30d = Math.max(0, volume30dUsd);
+  // No RPC/price in calendar-only path; use heuristic from event count (same as buildUnlockOnlySupplyRisk).
+  const pressureRatioClean =
+    eventCount > 0 ? Math.min(1, Math.max(0, 0.2 + eventCount * 0.05)) : 0;
+  const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
+  const liquidityScore = computeLiquidityStressScore(pressureRatioClean, 0, 0);
+  const liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
+  const riskTier = getRiskTier(liquidityStressRounded);
+  const forwardCurve = buildForwardRiskWithUncertainty(liquidityScore, liquidityScore * 1.1, liquidityScore * 1.2, {
+    volatilityHint: pressureRatioClean > 0.5 ? 0.4 : 0.2,
+    dataQuality: 0.6,
+    unlockVariance: 0.5,
+    volumeVariance: 0.5,
+  });
+
+  const out = defaultOutput(1, volume30dUsd, nowSec, 0, 0, nowSec);
+  out.analysis_scope = "calendar_only";
+  out.unlock_pressure_ratio = Number(Number(pressureRatioClean).toFixed(4));
+  out.unlock_pressure_classification = unlockPressureClassification;
+  out.next_estimated_unlock_timestamp = nextUnlockTs;
+  out.liquidity_stress_score = liquidityStressRounded;
+  out.risk_tier = riskTier;
+  out.forward_risk_curve = forwardCurve;
+  out.risk_flags = pressureRatioClean > 0 ? ["UNLOCK_SCHEDULE", "CALENDAR_ONLY"] : ["CALENDAR_ONLY"];
+  out.token_symbol = asset.symbol;
+  out.unlock_provider = unlockData.source ?? "ManualRegistry";
+  out.unlock_provider_confidence = unlockData.confidence_score ?? 0.9;
+  out.analysis_provenance = {
+    primary_model: "registry",
+    fallback_used: false,
+    unlock_data_available: true,
+    confidence_basis: "unlock_events",
+  };
+  out.data_freshness = buildDataFreshness({
+    supply_snapshot_timestamp: nowSec,
+    volume_snapshot_timestamp: nowSec,
+    last_rpc_block_number: 0,
+    block_number_used: 0,
+    block_timestamp_used: 0,
+    nowSec,
+  });
+  return out;
 }
 
 /** Exported for soft-failure flat construction (no-data / business-logic failure). */

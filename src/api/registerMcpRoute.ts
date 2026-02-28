@@ -185,8 +185,8 @@ const MCP_TOOLS = [
         pattern_confidence_score: { type: "number" as const },
         analysis_scope: {
           type: "string" as const,
-          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient", "unsupported"] as const,
-          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, unsupported (chain not supported), or legacy dynamic/registry/hybrid.",
+          enum: ["dynamic", "registry", "hybrid", "dynamic_fallback", "technical_onchain", "unlock_only", "combined", "supply_only", "insufficient", "unsupported", "calendar_only"] as const,
+          description: "Scope of analysis: combined (unlock + supply), unlock_only, supply_only, insufficient, unsupported (chain not supported), calendar_only (ManualRegistry for unsupported chain), or legacy dynamic/registry/hybrid.",
         },
         analysis_provenance: {
           type: "object" as const,
@@ -551,7 +551,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const patternConf = o.pattern_confidence_score;
   const validPatternConf = typeof patternConf === "number" && Number.isFinite(patternConf) && (patternConf as number) >= 0 && (patternConf as number) <= 100;
   const scope = o.analysis_scope;
-  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain" || scope === "unlock_only" || scope === "combined" || scope === "supply_only" || scope === "insufficient" || scope === "unsupported";
+  const validScope = scope === "dynamic" || scope === "registry" || scope === "hybrid" || scope === "dynamic_fallback" || scope === "technical_onchain" || scope === "unlock_only" || scope === "combined" || scope === "supply_only" || scope === "insufficient" || scope === "unsupported" || scope === "calendar_only";
   const provenance = o.analysis_provenance;
   const validProvenance =
     provenance == null ||

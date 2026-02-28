@@ -121,7 +121,7 @@ export interface SupplyRiskOutputFlat {
   holder_data_confidence_score: number;
   combined_volatility_index: number;
   pattern_confidence_score: number;
-  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported";
+  analysis_scope: "dynamic" | "registry" | "hybrid" | "dynamic_fallback" | "technical_onchain" | "unlock_only" | "combined" | "supply_only" | "insufficient" | "unsupported" | "calendar_only";
   /** Intelligence provenance: which model produced the result and why. Always set on success. */
   analysis_provenance: AnalysisProvenance;
   /** Unlock provider name (e.g. ManualRegistry, Mobula, DefiLlama). */
@@ -337,6 +337,29 @@ export function buildStructuredNoDataSupplyRisk(
 }
 
 /**
+ * Build supply risk result for unsupported chains when ManualRegistry has unlock data.
+ * analysis_scope: "calendar_only"; no RPC, holder analysis, or liquidity checks.
+ */
+function buildCalendarOnlySupplyRisk(
+  token_symbol: string,
+  unlockData: {
+    nextUnlockTimestamp?: number | null;
+    unlockEvents?: { unlock_timestamp: number }[] | null;
+    source?: string;
+    unlock_provider?: string;
+    unlock_provider_confidence?: number;
+  },
+  analysisTimestamp: string
+): SupplyRiskOutputFlat {
+  const base = buildUnlockOnlySupplyRisk(token_symbol, unlockData, analysisTimestamp);
+  base.analysis_scope = "calendar_only";
+  base.risk_flags = (base.risk_flags ?? []).includes("UNLOCK_SCHEDULE")
+    ? ["UNLOCK_SCHEDULE", "CALENDAR_ONLY"]
+    : ["CALENDAR_ONLY"];
+  return base;
+}
+
+/**
  * Build supply risk result for non-EVM assets using unlock schedule only (no RPC/explorer).
  * Used when asset.supported === false but unlockData.success === true.
  */
@@ -459,8 +482,21 @@ export async function runAnalyzeTokenSupplyRisk(
     chain: chainSlug,
   });
 
-  // Chain capability gate: only ethereum, bsc, arbitrum, base. No unlock or RPC for others.
+  // ManualRegistry must be checked BEFORE chain gating so non-EVM tokens (e.g. HEMI) can get calendar-based unlock analysis.
+  const unlockDataEarly = await fetchUnlockData(asset);
+
+  // Chain capability gate: only ethereum, bsc, arbitrum, base. Allow calendar-only when ManualRegistry has data.
   if (!isChainSupported(asset.chain)) {
+    if (unlockDataEarly.success && unlockDataEarly.unlockEvents && unlockDataEarly.unlockEvents.length > 0) {
+      logger.info(
+        { symbol: asset.symbol, chain: asset.chain, source: unlockDataEarly.source },
+        "MANUAL_REGISTRY_OVERRIDE_UNSUPPORTED_CHAIN"
+      );
+      return {
+        success: true,
+        data: buildCalendarOnlySupplyRisk(asset.symbol, unlockDataEarly, analysisTimestamp),
+      };
+    }
     const detectedChain = asset.platform_display_name ?? asset.chain ?? "unknown";
     return {
       success: true,
