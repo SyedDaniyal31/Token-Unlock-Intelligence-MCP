@@ -21,8 +21,10 @@ export interface ExplorerFetchResult {
 export interface UnlockFetchResult {
   success: boolean;
   source?: "registry" | "external_calendar" | "scanner" | "inferred";
-  unlockEvents?: { unlock_timestamp: number }[] | null;
+  unlockEvents?: { unlock_timestamp: number; unlock_percent?: number }[] | null;
   nextUnlockTimestamp?: number | null;
+  /** Unlock % of total supply from manual registry (e.g. 30.2). Do not recalculate; use for display. */
+  nextUnlockUnlockPercent?: number | null;
   /** Raw provider name (e.g. ManualRegistry, DefiLlama). */
   unlock_provider?: string;
   /** Provider confidence 0–1. */
@@ -87,15 +89,20 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
       DefiLlama: "external_calendar",
     };
     const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");
+    const events = result.events;
     const unlockEvents =
-      result.events.length > 0
-        ? result.events.map((e) => ({ unlock_timestamp: e.unlock_timestamp }))
+      events.length > 0
+        ? events.map((e) => ({ unlock_timestamp: e.unlock_timestamp, unlock_percent: e.unlock_percent }))
         : null;
+    const nextEvent = events.length > 0 ? events[0] : null;
+    const nextUnlockUnlockPercent =
+      nextEvent?.unlock_percent != null && Number.isFinite(nextEvent.unlock_percent) ? nextEvent.unlock_percent : null;
     return {
       success: result.success,
       source,
       unlockEvents,
       nextUnlockTimestamp: result.next_unlock_timestamp ?? null,
+      nextUnlockUnlockPercent,
       unlock_provider: result.source === "none" ? undefined : result.source,
       unlock_provider_confidence: result.confidence_score ?? 0,
     };

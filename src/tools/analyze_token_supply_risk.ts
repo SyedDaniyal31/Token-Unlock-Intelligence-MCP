@@ -139,6 +139,8 @@ export interface SupplyRiskOutputFlat {
   unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
   /** Unlock amount / circulating supply (0–1). */
   supply_unlock_percent?: number;
+  /** Unlock % of total supply from manual registry (e.g. 30.2). Use for display; do not recalculate. */
+  registry_unlock_percent?: number | null;
   /** New risk model outputs. */
   event_severity_label?: string;
   absorption_risk_label?: string;
@@ -343,7 +345,8 @@ function buildCalendarOnlySupplyRisk(
   token_symbol: string,
   unlockData: {
     nextUnlockTimestamp?: number | null;
-    unlockEvents?: { unlock_timestamp: number }[] | null;
+    nextUnlockUnlockPercent?: number | null;
+    unlockEvents?: { unlock_timestamp: number; unlock_percent?: number }[] | null;
     source?: string;
     unlock_provider?: string;
     unlock_provider_confidence?: number;
@@ -361,12 +364,14 @@ function buildCalendarOnlySupplyRisk(
 /**
  * Build supply risk result for non-EVM assets using unlock schedule only (no RPC/explorer).
  * Used when asset.supported === false but unlockData.success === true.
+ * Uses manual registry unlock_percent when present; no recalculation from total_supply.
  */
 function buildUnlockOnlySupplyRisk(
   token_symbol: string,
   unlockData: {
     nextUnlockTimestamp?: number | null;
-    unlockEvents?: { unlock_timestamp: number }[] | null;
+    nextUnlockUnlockPercent?: number | null;
+    unlockEvents?: { unlock_timestamp: number; unlock_percent?: number }[] | null;
     source?: string;
     unlock_provider?: string;
     unlock_provider_confidence?: number;
@@ -374,12 +379,15 @@ function buildUnlockOnlySupplyRisk(
   analysisTimestamp: string
 ): SupplyRiskOutputFlat {
   const nowSec = Math.floor(Date.now() / 1000);
-  const base = defaultOutput(1, 0, undefined, 0, 0, nowSec);
   const eventCount = unlockData.unlockEvents?.length ?? 0;
   const nextUnlock = unlockData.nextUnlockTimestamp ?? null;
   const hasCliff = eventCount > 0 && nextUnlock != null && nextUnlock > nowSec;
   const pressureRatio = eventCount > 0 ? Math.min(1, 0.2 + eventCount * 0.05) : 0;
-  const supplyUnlockPct = pressureRatio;
+  const registryPct = unlockData.nextUnlockUnlockPercent;
+  const supplyUnlockPct =
+    registryPct != null && Number.isFinite(registryPct)
+      ? Math.min(1, Math.max(0, registryPct / 100))
+      : pressureRatio;
   const riskModel = computeUnlockRisk({
     unlock_percent_of_circulating: supplyUnlockPct,
     unlock_amount: 0,
@@ -387,19 +395,19 @@ function buildUnlockOnlySupplyRisk(
     next_unlock_timestamp: nextUnlock,
   });
   const full: SupplyRiskOutputFlat = {
-    ...base,
+    ...defaultOutput(1, 0, undefined, 0, 0, nowSec),
     engine_latency_ms: 0,
     result_integrity_hash: "",
     next_estimated_unlock_timestamp: nextUnlock,
     unlock_schedule_status: nextUnlock != null ? "active" : "completed",
-    unlock_pressure_ratio: Number(pressureRatio.toFixed(4)),
+    unlock_pressure_ratio: Number(supplyUnlockPct.toFixed(4)),
     cliff_detected: hasCliff,
     final_risk_tier: riskModel.final_risk_tier,
     event_severity_label: riskModel.event_severity_label,
     absorption_risk_label: riskModel.absorption_risk_label,
     timing_urgency_label: riskModel.timing_urgency_label,
     composite_score: riskModel.composite_score,
-    risk_flags: eventCount > 0 ? ["UNLOCK_SCHEDULE"] : base.risk_flags,
+    risk_flags: eventCount > 0 ? ["UNLOCK_SCHEDULE"] : [],
     analysis_scope: "unlock_only",
     analysis_provenance: {
       primary_model: "registry",
@@ -410,6 +418,8 @@ function buildUnlockOnlySupplyRisk(
     unlock_data_source: (unlockData.source as "registry" | "external_calendar" | "scanner" | "inferred") ?? "registry",
     unlock_provider: unlockData.unlock_provider,
     unlock_provider_confidence: unlockData.unlock_provider_confidence,
+    supply_unlock_percent: supplyUnlockPct,
+    registry_unlock_percent: registryPct ?? null,
     search_exhausted: false,
     records_found: eventCount > 0 ? 1 : 0,
     no_results_reason: undefined,

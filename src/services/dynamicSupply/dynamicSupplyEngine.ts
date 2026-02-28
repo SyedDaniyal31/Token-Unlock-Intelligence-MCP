@@ -132,6 +132,8 @@ export interface DynamicSupplyOutput {
   unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
   /** Unlock amount / circulating supply (0–1). */
   supply_unlock_percent?: number;
+  /** Unlock % of total supply from manual registry (e.g. 30.2). Use for display; do not recalculate. */
+  registry_unlock_percent?: number | null;
   /** New risk model outputs. */
   event_severity_label?: string;
   absorption_risk_label?: string;
@@ -450,19 +452,22 @@ export async function runDynamicSupplyEngine(
     unlockIntelSource !== "inferred" &&
     (unlockIntelEvents.length > 0 || nextUnlockTs !== null);
 
-  // Supply shock severity: unlock_percent_of_supply (additive override layer)
+  // Supply shock severity: use manual registry unlock_percent when present; do not recalculate from total_supply.
   let supplyUnlockPercent = 0;
+  let registryUnlockPercent: number | null = null;
   if (unlock_data_available && unlockData.events.length > 0) {
-    const supplyForCalc = Math.max(1, totalSupply);
-    const unlockPctFromEvents = unlockData.events
-      .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent / 100 : 0))
-      .filter((p) => p > 0);
-    if (unlockPctFromEvents.length > 0) {
-      supplyUnlockPercent = Math.max(...unlockPctFromEvents);
-    } else if (totalUnlockTokens > 0) {
-      supplyUnlockPercent = totalUnlockTokens / supplyForCalc;
+    const rawPcts = unlockData.events
+      .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent : null))
+      .filter((p): p is number => p != null && p > 0);
+    if (rawPcts.length > 0) {
+      registryUnlockPercent = Number(Number(Math.max(...rawPcts)).toFixed(2));
+      supplyUnlockPercent = Math.min(1, Math.max(0, registryUnlockPercent / 100));
+    } else {
+      const supplyForCalc = Math.max(1, totalSupply);
+      if (totalUnlockTokens > 0) {
+        supplyUnlockPercent = Math.min(1, Math.max(0, totalUnlockTokens / supplyForCalc));
+      }
     }
-    supplyUnlockPercent = Math.min(1, Math.max(0, supplyUnlockPercent));
   }
   const hasUnlockData = unlock_data_available;
   const hasOnchainData = totalSupply > 0;
@@ -785,6 +790,7 @@ export async function runDynamicSupplyEngine(
 
   if (unlock_data_available) {
     out.supply_unlock_percent = Number(Number(supplyUnlockPercent).toFixed(4));
+    out.registry_unlock_percent = registryUnlockPercent;
   }
 
   // Apply new risk model (severity, absorption, timing → composite → final_risk_tier)
@@ -882,6 +888,7 @@ function buildCalendarOnlyOutput(
   out.liquidity_stress_score = liquidityStressRounded;
   const supplyUnlockPct = supplyInflationPct / 100;
   out.supply_unlock_percent = Number(Number(supplyUnlockPct).toFixed(4));
+  out.registry_unlock_percent = nextUnlock?.unlock_percent != null && Number.isFinite(nextUnlock.unlock_percent) ? Number(Number(nextUnlock.unlock_percent).toFixed(2)) : supplyInflationPct > 0 ? Number(Number(supplyInflationPct).toFixed(2)) : null;
   const unlockAmountUsd = 0;
   const avgDailyVolume = volume30d > 0 ? volume30d / 30 : 1;
   const riskModel = computeUnlockRisk({

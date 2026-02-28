@@ -282,7 +282,7 @@ const MCP_TOOLS = [
           description: "Institutional-grade event severity block (primary output).",
           properties: {
             severity: { type: "string" as const, enum: ["EXTREME", "HIGH", "ELEVATED", "MODERATE"] as const },
-            unlock_percent_of_total_supply: { type: "number" as const },
+            unlock_percent_of_total_supply: { type: ["number", "null"] as const, description: "From manual registry; null when missing." },
             unlock_amount: { type: ["number", "null"] as const },
             unlock_date: { type: ["string", "null"] as const },
             days_until_unlock: { type: ["number", "null"] as const },
@@ -424,9 +424,13 @@ function getRiskLabels(obj: Record<string, unknown>): {
   composite_score: number;
   final_risk_tier: string;
 } {
-  const pct = typeof obj.supply_unlock_percent === "number" && Number.isFinite(obj.supply_unlock_percent as number)
+  const registryPct = typeof obj.registry_unlock_percent === "number" && Number.isFinite(obj.registry_unlock_percent as number)
+    ? (obj.registry_unlock_percent as number) / 100
+    : null;
+  const supplyPct = typeof obj.supply_unlock_percent === "number" && Number.isFinite(obj.supply_unlock_percent as number)
     ? (obj.supply_unlock_percent as number)
-    : 0;
+    : null;
+  const pct = registryPct ?? supplyPct ?? 0;
   const unlockAmount = typeof obj.unlock_amount_usd === "number" && Number.isFinite(obj.unlock_amount_usd as number)
     ? (obj.unlock_amount_usd as number)
     : 0;
@@ -485,9 +489,22 @@ function getMarketInterpretation(unlockPercent: number): string {
 function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const now = Math.floor(Date.now() / 1000);
+  const registryUnlockPercent =
+    typeof obj.registry_unlock_percent === "number" && Number.isFinite(obj.registry_unlock_percent as number)
+      ? Number((obj.registry_unlock_percent as number).toFixed(2))
+      : null;
   const supplyUnlockPct = typeof obj.supply_unlock_percent === "number" && Number.isFinite(obj.supply_unlock_percent as number)
     ? (obj.supply_unlock_percent as number)
-    : 0;
+    : null;
+  const unlockPercent =
+    registryUnlockPercent != null
+      ? registryUnlockPercent
+      : supplyUnlockPct != null
+        ? Number((supplyUnlockPct * 100).toFixed(2))
+        : null;
+  if (unlockPercent == null) {
+    console.warn("Unlock percent missing in manual registry");
+  }
   const nextTs = typeof obj.next_estimated_unlock_timestamp === "number" && Number.isFinite(obj.next_estimated_unlock_timestamp as number)
     ? (obj.next_estimated_unlock_timestamp as number)
     : null;
@@ -502,7 +519,7 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     : undefined;
 
   const riskLabels = getRiskLabels(obj);
-  const magnitudePct = Number((supplyUnlockPct * 100).toFixed(1));
+  const magnitudePct = unlockPercent;
   const eventDate = nextTs != null ? formatEventDate(nextTs) : null;
   const daysUntilUnlock = nextTs != null ? Math.max(0, Math.ceil((nextTs - now) / 86400)) : null;
   const volumeRatioDays = Number((unlockPressureRatio * 30).toFixed(1));
@@ -520,7 +537,7 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     final_risk_tier: riskLabels.final_risk_tier,
   };
 
-  const marketInterpretation = getMarketInterpretation(supplyUnlockPct);
+  const marketInterpretation = getMarketInterpretation(unlockPercent != null ? unlockPercent / 100 : 0);
 
   out.market_impact_analysis = {
     volume_ratio_days: volumeRatioDays,
@@ -531,7 +548,7 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
   const lines: string[] = [];
   lines.push("=== Unlock Event Assessment ===");
   lines.push(`Severity: ${riskLabels.event_severity_label}`);
-  lines.push(`Magnitude: ${magnitudePct}% of total supply`);
+  lines.push(`Magnitude: ${magnitudePct != null ? `${magnitudePct}%` : "—"} of total supply`);
   lines.push(`Event Date: ${eventDate ?? "—"}`);
   lines.push(`Days Until Event: ${daysUntilUnlock != null ? `${daysUntilUnlock} days` : "—"}`);
   lines.push("");
@@ -544,12 +561,14 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
 
   out.assessment_report = lines.join("\n");
 
-  if (supplyUnlockPct >= 0.2 && nextTs != null) {
-    out.analysis_summary = `A large supply expansion event of ${magnitudePct}% of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
-  } else if (supplyUnlockPct >= 0.1 && nextTs != null) {
-    out.analysis_summary = `A significant supply expansion event of ${magnitudePct}% of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
-  } else if (supplyUnlockPct >= 0.05) {
-    out.analysis_summary = `An elevated supply expansion event of ${magnitudePct}% of total supply is scheduled. ${marketInterpretation}`;
+  const ratioForTier = unlockPercent != null ? unlockPercent / 100 : 0;
+  const pctLabel = magnitudePct != null ? `${magnitudePct}%` : "—";
+  if (ratioForTier >= 0.2 && nextTs != null) {
+    out.analysis_summary = `A large supply expansion event of ${pctLabel} of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
+  } else if (ratioForTier >= 0.1 && nextTs != null) {
+    out.analysis_summary = `A significant supply expansion event of ${pctLabel} of total supply is scheduled for ${eventDate}. ${marketInterpretation}`;
+  } else if (ratioForTier >= 0.05) {
+    out.analysis_summary = `An elevated supply expansion event of ${pctLabel} of total supply is scheduled. ${marketInterpretation}`;
   } else {
     out.analysis_summary = `This analysis reflects scheduled token release events. ${marketInterpretation}`;
   }
