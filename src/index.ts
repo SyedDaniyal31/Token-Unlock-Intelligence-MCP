@@ -1,9 +1,11 @@
 import "dotenv/config";
+import * as path from "path";
 import { config } from "./core/config.js";
 import { start, shutdown } from "./app.js";
 import { runMigrations } from "./infrastructure/db/runMigrations.js";
 import { ensureManualRegistryTableChecked } from "./infrastructure/db/ensureManualRegistryTable.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
+import { importManualRegistryFromCmcCsv } from "./scripts/importManualRegistryCmcFormat.js";
 import { getConfiguredChains } from "./infrastructure/rpc/chainProviderFactory.js";
 import logger from "./core/logger.js";
 
@@ -53,6 +55,16 @@ async function bootstrap(): Promise<void> {
     await ensureManualRegistryTableChecked();
   } catch (err) {
     logger.warn({ err }, "Manual registry table check failed; continuing.");
+  }
+
+  try {
+    const csvPath = path.join(__dirname, "scripts", "manual_registry.csv");
+    const cmcImported = await importManualRegistryFromCmcCsv(csvPath);
+    if (cmcImported > 0) {
+      logger.info({ rows: cmcImported }, "Manual registry CMC CSV imported on startup");
+    }
+  } catch (err) {
+    logger.warn({ err }, "Manual registry CMC import failed; continuing.");
   }
 
   try {

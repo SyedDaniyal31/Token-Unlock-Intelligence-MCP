@@ -10,6 +10,7 @@
     "dev": "ts-node src/index.ts",
     "import-registry": "node dist/scripts/importManualRegistry.js",
     "import-registry:file": "node dist/scripts/importManualRegistry.js src/scripts/manual_registry.csv",
+    "import:registry:cmc": "node dist/scripts/importManualRegistryCmcFormat.js",
     "import:registry:paste": "ts-node src/scripts/importManualRegistryFromPaste.ts"
   },
   "engines": {
