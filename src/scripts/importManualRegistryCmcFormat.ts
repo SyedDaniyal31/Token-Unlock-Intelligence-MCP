@@ -89,14 +89,19 @@ function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
   }
 
   // Deduplicate by (token_symbol, unlock_timestamp) to avoid "ON CONFLICT DO UPDATE cannot affect row a second time"
-  const byKey = new Map<string, ParsedRow>();
-  for (const r of rows) {
-    const key = `${r.token_symbol}|${r.unlock_timestamp}`;
-    byKey.set(key, r); // last wins
+  const uniqueMap = new Map<string, ParsedRow>();
+  for (const row of rows) {
+    const key = `${row.token_symbol}_${row.unlock_timestamp}`;
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, row);
+    }
   }
-  const deduped = [...byKey.values()];
-
-  return { rows: deduped, skipped };
+  const deduplicatedRows = Array.from(uniqueMap.values());
+  const duplicatesRemoved = rows.length - deduplicatedRows.length;
+  if (duplicatesRemoved > 0) {
+    logger.info({ count: duplicatesRemoved }, "MANUAL_REGISTRY_DUPLICATES_REMOVED");
+  }
+  return { rows: deduplicatedRows, skipped };
 }
 
 function buildBatchValues(batch: ParsedRow[]): { sql: string; values: unknown[] } {
@@ -185,7 +190,7 @@ export async function importManualRegistryFromCmcCsv(csvPath?: string): Promise<
     await client.query("ROLLBACK").catch(() => {});
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, "MANUAL_REGISTRY_CMC_IMPORT_FAILED");
-    throw err;
+    return 0; // Do not throw; allow server to continue startup
   } finally {
     await client.end();
   }
@@ -197,7 +202,7 @@ async function run(): Promise<void> {
 
   if (!fs.existsSync(resolvedPath)) {
     console.error("File not found:", resolvedPath);
-    process.exit(1);
+    return;
   }
 
   logger.info({ path: resolvedPath }, "MANUAL_REGISTRY_CMC_IMPORT_STARTED");
@@ -206,11 +211,10 @@ async function run(): Promise<void> {
   try {
     const processed = await importManualRegistryFromCmcCsv(resolvedPath);
     console.log("Rows processed (inserted + updated):", processed);
-    process.exit(0);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("Import failed:", message);
-    process.exit(1);
+    // Do not exit(1); allow process to finish without crashing
   }
 }
 

@@ -124,7 +124,21 @@ function parseCsv(content: string): { rows: ParsedRow[]; skipped: number } {
       source: SOURCE,
     });
   }
-  return { rows, skipped };
+
+  // Deduplicate by (token_symbol, unlock_timestamp) to avoid "ON CONFLICT DO UPDATE cannot affect row a second time"
+  const uniqueMap = new Map<string, ParsedRow>();
+  for (const row of rows) {
+    const key = `${row.token_symbol}_${row.unlock_timestamp}`;
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, row);
+    }
+  }
+  const deduplicatedRows = Array.from(uniqueMap.values());
+  const duplicatesRemoved = rows.length - deduplicatedRows.length;
+  if (duplicatesRemoved > 0) {
+    console.log("MANUAL_REGISTRY_DUPLICATES_REMOVED", { count: duplicatesRemoved });
+  }
+  return { rows: deduplicatedRows, skipped };
 }
 
 function buildBatchValues(batch: ParsedRow[]): { sql: string; values: unknown[] } {
@@ -172,7 +186,7 @@ async function run(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString?.trim()) {
     console.error("MANUAL_REGISTRY_IMPORT_FAILED: DATABASE_URL is not set");
-    process.exit(1);
+    return;
   }
 
   const client = new Client({
@@ -207,7 +221,7 @@ async function run(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     console.error("MANUAL_REGISTRY_IMPORT_FAILED", message);
     console.error("Import failed:", message);
-    process.exit(1);
+    // Do not exit(1); allow process to finish without crashing
   } finally {
     await client.end();
   }
