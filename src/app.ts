@@ -75,6 +75,17 @@ app.get("/", (req: Request, res: Response): void => {
 const verifyContextAuth = createContextMiddleware();
 registerMcpRoute(app, deps, [verifyContextAuth]);
 
+// POST catch-all: return JSON 404 for unmatched POSTs (diagnostic; avoids HTML 404 for Context Protocol)
+app.post("*", (req: Request, res: Response): void => {
+  const path = req.url ?? req.originalUrl ?? "";
+  logger.warn({ method: req.method, path, originalUrl: req.originalUrl }, "Unhandled POST route");
+  res.status(404).json({
+    error: "Route not found",
+    path,
+    expected: "POST /mcp",
+  });
+});
+
 app.use(errorHandler);
 
 let httpServer: HttpServer | null = null;
