@@ -143,6 +143,10 @@ export interface SupplyRiskOutputFlat {
   /** Supply Shock Fusion Index (0–100) and risk tier. */
   supply_shock_index?: number;
   supply_shock_risk_tier?: string;
+  /** Unlock amount / circulating supply (0–1). Supply shock severity layer. */
+  supply_unlock_percent?: number;
+  /** Supply shock classification: LOW | MODERATE | HIGH | EXTREME. */
+  supply_unlock_classification?: string;
   /** True when SSI cascade boost was applied (high unlock + high liquidity stress). */
   cascade_risk_detected?: boolean;
   /** Explicit no-data signaling for Context compatibility. Always set when risk_tier === "NO_DATA". */

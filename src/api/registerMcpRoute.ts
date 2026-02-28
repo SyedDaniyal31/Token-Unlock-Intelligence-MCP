@@ -270,6 +270,15 @@ const MCP_TOOLS = [
           enum: ["LOW", "MODERATE", "HIGH", "EXTREME"] as const,
           description: "SSI risk tier: 0–25 LOW, 26–50 MODERATE, 51–75 HIGH, 76–100 EXTREME.",
         },
+        supply_unlock_percent: {
+          type: "number" as const,
+          description: "Unlock amount / circulating supply (0–1). Supply shock severity layer.",
+        },
+        supply_unlock_classification: {
+          type: "string" as const,
+          enum: ["LOW", "MODERATE", "HIGH", "EXTREME"] as const,
+          description: "Supply shock classification from unlock % of supply: >=15% EXTREME, >=5% HIGH, >=2% MODERATE.",
+        },
         inferred_distribution_pressure: {
           type: "number" as const,
           description: "Inferred supply/distribution pressure when no scheduled unlock data; 0 or omitted when unlock data available.",

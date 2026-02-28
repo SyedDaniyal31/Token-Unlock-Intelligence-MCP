@@ -57,6 +57,24 @@ import {
 
 const REQUEST_TIMEOUT_MS = 8000;
 
+/** Supply shock severity from unlock_percent_of_supply (decimal 0–1). Additive override layer. */
+function classifySupplyShock(percent: number): "LOW" | "MODERATE" | "HIGH" | "EXTREME" {
+  if (percent >= 0.15) return "EXTREME";
+  if (percent >= 0.05) return "HIGH";
+  if (percent >= 0.02) return "MODERATE";
+  return "LOW";
+}
+
+/** Risk tier order for override: LOW < MODERATE < HIGH < EXTREME. */
+const RISK_TIER_ORDER = ["LOW", "MODERATE", "HIGH", "EXTREME"] as const;
+function riskTierIndex(tier: string): number {
+  const i = RISK_TIER_ORDER.indexOf(tier as (typeof RISK_TIER_ORDER)[number]);
+  return i >= 0 ? i : 0;
+}
+function maxRiskTier(a: string, b: string): string {
+  return riskTierIndex(a) >= riskTierIndex(b) ? a : b;
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Error("Dynamic engine aborted");
 }
@@ -135,6 +153,10 @@ export interface DynamicSupplyOutput {
   /** Supply Shock Fusion Index (0–100) and risk tier. */
   supply_shock_index?: number;
   supply_shock_risk_tier?: string;
+  /** Unlock amount / circulating supply (0–1). Supply shock severity layer. */
+  supply_unlock_percent?: number;
+  /** Supply shock classification: LOW | MODERATE | HIGH | EXTREME. */
+  supply_unlock_classification?: string;
   /** True when high unlock + high liquidity stress triggered SSI cascade boost. */
   cascade_risk_detected?: boolean;
   /** Inferred supply/distribution pressure when no scheduled unlock data; only set when unlock_data_available is false. */
@@ -426,15 +448,16 @@ export async function runDynamicSupplyEngine(
     providerUsed = unlockData.source ?? "DefiLlama";
   }
 
+  let totalUnlockTokens = 0;
   if (unlockIntelEvents.length > 0) {
+    totalUnlockTokens = unlockIntelEvents.reduce(
+      (sum, e) => sum + (Number.isFinite(Number(e.amount)) ? Number(e.amount) : 0),
+      0
+    );
     const priceForUnlockCalc =
       enrichment != null && Number.isFinite(enrichment.priceUsd) && enrichment.priceUsd > 0
         ? enrichment.priceUsd
         : toNum(input.price);
-    const totalUnlockTokens = unlockIntelEvents.reduce(
-      (sum, e) => sum + (Number.isFinite(Number(e.amount)) ? Number(e.amount) : 0),
-      0
-    );
     if (volume30d > 0 && priceForUnlockCalc > 0 && totalUnlockTokens > 0) {
       const pressureFromEvents = (totalUnlockTokens * priceForUnlockCalc) / volume30d;
       if (Number.isFinite(pressureFromEvents)) {
@@ -447,6 +470,26 @@ export async function runDynamicSupplyEngine(
   const unlock_data_available =
     unlockIntelSource !== "inferred" &&
     (unlockIntelEvents.length > 0 || nextUnlockTs !== null);
+
+  // Supply shock severity: unlock_percent_of_supply (additive override layer)
+  let supplyUnlockPercent = 0;
+  if (unlock_data_available && unlockData.events.length > 0) {
+    const supplyForCalc = Math.max(1, totalSupply);
+    const unlockPctFromEvents = unlockData.events
+      .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent / 100 : 0))
+      .filter((p) => p > 0);
+    if (unlockPctFromEvents.length > 0) {
+      supplyUnlockPercent = Math.max(...unlockPctFromEvents);
+    } else if (totalUnlockTokens > 0) {
+      supplyUnlockPercent = totalUnlockTokens / supplyForCalc;
+    }
+    supplyUnlockPercent = Math.min(1, Math.max(0, supplyUnlockPercent));
+  }
+  const supplyUnlockClassification = classifySupplyShock(supplyUnlockPercent);
+  logger.info(
+    { supply_unlock_percent: supplyUnlockPercent, supply_unlock_classification: supplyUnlockClassification },
+    "SUPPLY_SHOCK_CLASSIFICATION_COMPUTED"
+  );
 
   const hasUnlockData = unlock_data_available;
   const hasOnchainData = totalSupply > 0;
@@ -798,6 +841,17 @@ export async function runDynamicSupplyEngine(
   out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
   if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
 
+  // Supply shock severity override: large unlock % must elevate risk tier (additive, does not remove SSI)
+  if (unlock_data_available) {
+    out.supply_unlock_percent = Number(Number(supplyUnlockPercent).toFixed(4));
+    out.supply_unlock_classification = supplyUnlockClassification;
+    if (supplyUnlockClassification === "EXTREME") {
+      out.risk_tier = "HIGH";
+    } else if (supplyUnlockClassification === "HIGH") {
+      out.risk_tier = maxRiskTier(out.risk_tier, "MODERATE");
+    }
+  }
+
   // When scheduled unlock exists, inferred fields must not appear (mutual exclusivity).
   if (out.analysis_provenance.unlock_data_available && out.inferred_distribution_pressure != null) {
     delete out.inferred_distribution_pressure;
@@ -873,7 +927,21 @@ function buildCalendarOnlyOutput(
   out.unlock_pressure_classification = unlockPressureClassification;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
   out.liquidity_stress_score = liquidityStressRounded;
-  out.risk_tier = riskTier;
+  const supplyUnlockPct = supplyInflationPct / 100;
+  const supplyShockClass = classifySupplyShock(supplyUnlockPct);
+  out.supply_unlock_percent = Number(Number(supplyUnlockPct).toFixed(4));
+  out.supply_unlock_classification = supplyShockClass;
+  if (supplyShockClass === "EXTREME") {
+    out.risk_tier = "HIGH";
+  } else if (supplyShockClass === "HIGH") {
+    out.risk_tier = maxRiskTier(riskTier, "MODERATE");
+  } else {
+    out.risk_tier = riskTier;
+  }
+  logger.info(
+    { supply_unlock_percent: supplyUnlockPct, supply_unlock_classification: supplyShockClass },
+    "SUPPLY_SHOCK_CLASSIFICATION_COMPUTED"
+  );
   out.forward_risk_curve = forwardCurve;
   out.risk_flags = pressureRatioClean > 0 ? ["UNLOCK_SCHEDULE", "CALENDAR_ONLY"] : ["CALENDAR_ONLY"];
   out.token_symbol = asset.symbol;
