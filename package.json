@@ -7,7 +7,10 @@
     "build": "tsc && node scripts/copy-sql.js",
     "start": "node dist/index.js",
     "railway:deploy": "npm run build && node dist/index.js",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "import-registry": "node dist/scripts/importManualRegistry.js",
+    "import-registry:file": "node dist/scripts/importManualRegistry.js src/scripts/manual_registry.csv",
+    "import:registry:paste": "ts-node src/scripts/importManualRegistryFromPaste.ts"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -2,6 +2,7 @@ import "dotenv/config";
 import { config } from "./core/config.js";
 import { start, shutdown } from "./app.js";
 import { runMigrations } from "./infrastructure/db/runMigrations.js";
+import { ensureManualRegistryTableChecked } from "./infrastructure/db/ensureManualRegistryTable.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { getConfiguredChains } from "./infrastructure/rpc/chainProviderFactory.js";
 import logger from "./core/logger.js";
@@ -46,6 +47,12 @@ async function bootstrap(): Promise<void> {
     const message = err instanceof Error ? err.message : String(err);
     logger.fatal({ err, message }, "CRITICAL: Migrations failed; exiting.");
     process.exit(1);
+  }
+
+  try {
+    await ensureManualRegistryTableChecked();
+  } catch (err) {
+    logger.warn({ err }, "Manual registry table check failed; continuing.");
   }
 
   try {
