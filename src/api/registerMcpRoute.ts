@@ -71,7 +71,11 @@ const MCP_TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        token_symbol: { type: "string" as const, description: "Token ticker (e.g. MITO, ARB, ETH)" },
+        token_symbol: {
+          type: "string" as const,
+          description: "Token ticker (e.g. MITO, ARB, ETH)",
+          examples: ["ARB", "ETH", "OP", "MITO"],
+        },
       },
       required: ["token_symbol"] as const,
     },
@@ -84,14 +88,25 @@ const MCP_TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {
-        token_symbol: { type: "string" as const, description: "Token ticker for registry analysis (e.g. ETH, ARB). Omit when using token_address + chain for dynamic analysis." },
+        token_symbol: {
+          type: "string" as const,
+          description: "Token ticker for registry analysis (e.g. ETH, ARB). Omit when using token_address + chain for dynamic analysis.",
+          examples: ["ARB", "ETH", "UNI"],
+        },
         token_address: { type: "string" as const, description: "Contract address for dynamic analysis (use with chain)" },
         chain: {
           type: "string" as const,
           enum: ["ethereum", "arbitrum", "bsc", "base"] as const,
           description: "Chain to analyze; required when using token_address. Supported: ethereum, bsc, arbitrum, base.",
+          default: "ethereum",
+          examples: ["ethereum", "arbitrum", "bsc", "base"],
         },
-        timeframe_days: { type: "number" as const, description: "Analysis window in days; default 30" },
+        timeframe_days: {
+          type: "number" as const,
+          description: "Analysis window in days; default 30",
+          default: 30,
+          examples: [7, 30, 90],
+        },
         simulation_params: {
           type: "object" as const,
           description: "Optional: run market shock simulation (price_shock_pct, volume_shock_pct, unlock_multiplier)",
@@ -606,6 +621,7 @@ function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody):
   (response as JsonRpcSuccess).result = {
     ...obj,
     content: [{ type: "text" as const, text: JSON.stringify(obj) }],
+    structuredContent: obj,
     isError: false,
   };
   return response;
