@@ -1122,71 +1122,87 @@ export function registerMcpRoute(
 ): void {
   registerSseEndpoint(app);
   const handler: RequestHandler = async (req: Request, res: Response): Promise<void> => {
+    const requestId = req.body != null && typeof req.body === "object" && "id" in req.body ? (req.body as { id: unknown }).id ?? null : null;
+
+    const sendJsonRpc = (payload: JsonRpcSuccess | JsonRpcErrorBody): void => {
+      if (res.headersSent) return;
+      console.log("MCP POST responding");
+      res.status(200).set("Content-Type", "application/json").json(payload);
+    };
+
     try {
       const body = parseBody(req.body);
+      const methodName = body != null && typeof body.method === "string" ? body.method : "";
 
-      if (process.env.NODE_ENV !== "production" && body != null) {
-        logger.debug({ method: body.method }, "MCP call received");
-      }
+      console.log("MCP POST received:", methodName || "(no method)");
 
       if (!body) {
-        safeSend(res, jsonRpcError(null, -32600, "Invalid Request: body must be a JSON object."));
+        sendJsonRpc(jsonRpcError(null, -32600, "Invalid JSON-RPC request"));
+        return;
+      }
+      if (body.jsonrpc !== "2.0") {
+        sendJsonRpc(jsonRpcError(null, -32600, "Invalid JSON-RPC request"));
         return;
       }
 
-      const { jsonrpc, id, method, params } = body;
-      const requestId = id ?? null;
+      const id = body.id ?? null;
 
-      if (jsonrpc !== "2.0") {
-        safeSend(res, jsonRpcError(requestId, -32600, "Invalid Request: jsonrpc must be '2.0'."));
+      // listTools / tools/list: respond immediately, no DB, no async (avoids timeout)
+      if (methodName === "listTools" || methodName === "tools/list") {
+        sendJsonRpc(jsonRpcSuccess(id, { tools: MCP_TOOLS }));
         return;
       }
 
-      const methodName = typeof method === "string" ? method : "";
+      // initialize: respond immediately
+      if (methodName === "initialize") {
+        sendJsonRpc(handleInitialize(id));
+        return;
+      }
 
+      // Context lifecycle notifications (safe to ignore)
+      if (methodName.startsWith("notifications/")) {
+        sendJsonRpc({ jsonrpc: "2.0", id: null, result: null });
+        return;
+      }
+
+      if (methodName === "") {
+        sendJsonRpc(jsonRpcError(id, -32600, "Invalid Request: method is required."));
+        return;
+      }
+
+      // All other methods: call handler then send (may be async)
       let response: JsonRpcSuccess | JsonRpcErrorBody;
 
-      if (methodName === "listTools" || methodName === "tools/list") {
-        response = handleListTools(requestId);
-      } else if (methodName === "callTool" || methodName === "tools/call") {
-        response = await handleCallTool(requestId, params, deps);
+      if (methodName === "callTool" || methodName === "tools/call") {
+        response = await handleCallTool(id, body.params, deps);
       } else if (methodName === "analyze_token_supply_risk") {
-        const args = parseArguments(params);
+        const args = parseArguments(body.params);
         const tokenSymbol = args.token_symbol ?? args.tokenSymbol ?? args.token;
         const token = (typeof tokenSymbol === "string" ? tokenSymbol : tokenSymbol != null ? String(tokenSymbol) : "").trim();
-        response = await handleAnalyzeTokenSupplyRisk(requestId, token, args, deps);
-      } else if (methodName === "initialize") {
-        response = handleInitialize(requestId);
-      } else if (methodName === "") {
-        response = jsonRpcError(requestId, -32600, "Invalid Request: method is required.");
+        response = await handleAnalyzeTokenSupplyRisk(id, token, args, deps);
       } else {
-        // Context lifecycle notifications (safe to ignore)
-        if (typeof method === "string" && method.startsWith("notifications/")) {
-          safeSend(res, { jsonrpc: "2.0", id: null, result: null });
-          return;
-        }
         logger.warn({ method: methodName }, "MCP method not found");
-        response = jsonRpcError(requestId, -32601, `Method not found: ${methodName}.`);
+        response = jsonRpcError(id, -32601, `Method not found: ${methodName}.`);
       }
 
       if (!response || typeof response !== "object" || !("jsonrpc" in response)) {
-        response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_ROUTER_RESPONSE", 0));
+        response = jsonRpcSuccess(id, buildSoftFailureSupplyRisk("INVALID_ROUTER_RESPONSE", 0));
       }
       if ("result" in response) {
         const r = (response as JsonRpcSuccess).result;
         if (r == null || Array.isArray(r) || typeof r !== "object") {
-          response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("INVALID_RESULT_SHAPE", 0));
+          response = jsonRpcSuccess(id, buildSoftFailureSupplyRisk("INVALID_RESULT_SHAPE", 0));
         } else if ("success" in r && "data" in r) {
           const inner = (r as { success: unknown; data: unknown }).data;
           response = jsonRpcSuccess(
-            requestId,
+            id,
             inner != null && typeof inner === "object" && !Array.isArray(inner)
               ? inner
               : buildSoftFailureSupplyRisk("EMPTY_DATA_GUARD", 0)
           );
         }
       }
-      response = ensureFlatResultPayload(response, requestId);
+      response = ensureFlatResultPayload(response, id);
       if (
         (methodName === "callTool" || methodName === "tools/call") &&
         "result" in response &&
@@ -1198,30 +1214,23 @@ export function registerMcpRoute(
       }
       if ("result" in response) {
         if (Array.isArray((response as JsonRpcSuccess).result) || (response as JsonRpcSuccess).result == null) {
-          response = jsonRpcSuccess(requestId, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
+          response = jsonRpcSuccess(id, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
         }
       }
-      logger.info(
-        {
-          id: requestId,
-          method: methodName,
-          hasResult: "result" in response,
-          resultKeys:
-            "result" in response && (response as JsonRpcSuccess).result != null && typeof (response as JsonRpcSuccess).result === "object" && !Array.isArray((response as JsonRpcSuccess).result)
-              ? Object.keys((response as JsonRpcSuccess).result as object).slice(0, 15)
-              : null,
-        },
-        "FINAL_JSON_RPC_RESPONSE_SENT"
-      );
-      safeSend(res, response);
+      logger.info({ id, method: methodName, hasResult: "result" in response }, "MCP POST result ready");
+      sendJsonRpc(response);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, message }, "MCP POST unhandled error");
-      const errorMessage =
-        process.env.NODE_ENV === "production"
-          ? "Unexpected server error. Please try again."
-          : `Unexpected server error: ${message}.`;
-      safeSend(res, jsonRpcError(null, -32603, errorMessage));
+      if (!res.headersSent) {
+        console.log("MCP POST responding (error)");
+        const errId = typeof requestId === "number" || typeof requestId === "string" ? requestId : null;
+        res.status(200).set("Content-Type", "application/json").json({
+          jsonrpc: "2.0",
+          id: errId,
+          error: { code: -32603, message: "Internal server error" },
+        });
+      }
     }
   };
 
