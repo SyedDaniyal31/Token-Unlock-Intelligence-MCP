@@ -5,6 +5,7 @@
 
 import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
 import { resolveTokenBySymbol, createUnlockTokenRegistry, SUPPORTED_CHAINS } from "../utils/tokenResolver.js";
+import { MANUAL_REGISTRY_SYMBOLS } from "./manualRegistrySymbols.generated.js";
 
 export type ChainSlug = "ethereum" | "bsc" | "arbitrum" | "base" | "unsupported";
 
@@ -34,37 +35,6 @@ const KNOWN_EVM_SYMBOLS: Record<string, { chain: ChainSlug; contract_address: st
   BEAT: { chain: "bsc", contract_address: "0xcf3232B85b43BCa90E51D38cc06Cc8bB8C8A3E36" },
   ONDO: { chain: "ethereum", contract_address: "0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3" },
 };
-
-/** Symbols from manual_registry.csv; when present, allow calendar-only path (unlock dates from ManualRegistry). */
-const MANUAL_REGISTRY_SYMBOLS = new Set<string>([
-  "2MOON", "2Z", "3-MAR", "5IRE", "A1X", "ABYS", "ACA", "ACE", "ACM", "AFG", "AGG", "AGT", "AI", "AIA", "AIBOT", "AIN",
-  "ALLO", "ALPHA", "ALT", "ALTD", "AMBO", "ANIM", "ANIME", "AP3X", "APE", "APPA", "ARBI", "ARC", "ARIA", "ASR", "ASTER",
-  "ATA", "ATM", "ATPAY", "ATS", "AVA", "AVAIL", "AVTM", "AXL", "AXT", "AZUR", "AZY", "BAR", "BARD", "BARS", "BAY", "BBBTC",
-  "BBL", "BCUT", "BD20", "BEAT", "BEE", "BERA", "BFT", "BIGTIME", "BLESS", "BLS", "BOOP", "BOT", "BOX", "BREV", "BTCLE",
-  "BTG", "BTR", "BTW", "BUBBLE", "BULLA", "BWLD", "C", "CARV", "CAT", "CATGOLD", "CATI", "CHAPZ", "CHECK", "CO", "COA",
-  "COBE", "CRO", "CROS", "CSW", "CTT", "CU", "CUDIS", "DBR", "DECHAT", "DELABS", "DEP", "DGC", "DHN", "DIA", "DIGI",
-  "DINW", "DL", "DMC", "DREP", "DRIFT", "DUEL", "DUET", "DYNA", "E2P", "EARN", "EDEN", "EDU", "EGO", "ELDE", "EPIK",
-  "EPIKO", "EPT", "ESPORTS", "ETAN", "EVO", "EXVG", "F", "FANX", "FBX", "FHE", "FJO", "FLOCK", "FNTR", "FOGO", "FOREST",
-  "FP", "FRA", "FRAG", "FTR", "G", "G3", "GAIA", "GAIX", "GATA", "GENE", "GFAL", "GOAL", "GOD", "GODS", "GOHOME", "GPS",
-  "GPT", "GRFT", "GROW", "GUA", "H", "H1", "HAEDAL", "HAO", "HEMI", "HGPT", "HMND", "HOLO", "HOME", "HOOK", "HUMA", "HUT",
-  "ID", "IDNG", "IDOS", "IKA", "INFRA", "INSP", "IO", "IRL", "ISME", "IVPAY", "JACKSON", "JCT", "JET", "JOJO", "JTO",
-  "JUICE", "JUV", "K", "KAITO", "KARATE", "KARRAT", "KAT", "KITE", "KO", "KPN", "KULA", "LA", "LAYER", "LBP", "LETIT",
-  "LF", "LINEA", "LISA", "LISTA", "LITT", "LL", "LMR", "LN", "LNQ", "LOE", "LONG", "LRT", "LUMIA", "LUX", "LVN", "MAGMA",
-  "MAMO", "MANTA", "MAS", "MATTLE", "MAVIA", "MBG", "MBOX", "MCH", "MERC", "MERL", "MGL", "MIA", "MIRA", "MITO", "MLN",
-  "MODE", "MOJO", "MON", "MONI", "MOT", "MOVE", "MRLN", "MSTAR", "MUNITY", "MVRK", "MWXT", "MYRIA", "MYX", "N4T", "NAVX",
-  "NEUROS", "NFE", "NFP", "NIL", "NKN", "NOOB", "NUUM", "O4DX", "OGN", "OIK", "OL", "OLE", "OME", "ON", "ONDO", "ORBK",
-  "ORBR", "ORFY", "ORN", "ORTA", "P", "PARTI", "PAXI", "PBUX", "PDA", "PEPPER", "PEPU", "PFVS", "PIEVERSE", "PIGGY",
-  "PIXEL", "PLAY", "PLUME", "PLX", "POR", "PORT3", "PORTAL", "PORTO", "POWER", "PPT", "PRAI", "PRCL", "PROMPT", "PROVE",
-  "PSG", "PTU", "PUBLIC", "PUFFER", "PUMP", "PYTH", "PZP", "Q", "RADAR", "RAFT", "RAIN", "RBC", "RDAC", "RDF", "RDO",
-  "REPPO", "REVO", "REZ", "RICE", "RION", "RIVER", "RLC", "RMV", "ROA", "ROSX", "RPK", "SABAI", "SABLE", "SAGA", "SAHARA",
-  "SAI", "SAROS", "SCA", "SCR", "SDEX", "SEI", "SEILOR", "SENTIS", "SERAPH", "SFTY", "SHARDS", "SHARK", "SHC", "SHELL",
-  "SIGN", "SIPHER", "SIXP", "SKYA", "SLAY", "SLF", "SMART", "SNSY", "SOLV", "SPACE", "SPOL", "SPT", "SQR", "SQT", "SQUAD",
-  "SSNC", "STAR", "STIK", "STOP", "STRAX", "STRDY", "STRK", "SUBHUB", "SUP", "TA", "TADA", "TAKE", "TALE", "TALK", "TBOT",
-  "TEA", "TEM", "THEROS", "TICS", "TIN", "TITN", "TKO", "TRALA", "TREE", "TRIO", "TROSS", "TURBOS", "UB", "UCBI", "UDS",
-  "UIBT", "ULTI", "ULTIMA", "UNICE", "UPT", "UTK", "UTT", "VANA", "VAPE", "VCORE", "VDA", "VDT", "VELVET", "VIA", "VIC",
-  "VOLS", "VPR", "VRTX", "VSX", "VT", "VV", "WAI", "WAL", "WBAI", "WCT", "WEB3", "WGT", "WIFI", "WLTH", "WNDR", "WOL",
-  "WOM", "WOO", "X", "XAR", "XBLAZE", "XNAP", "XO", "XTER", "Y8U", "ZBCN", "ZET", "ZEUS", "ZKJ", "ZRO", "ZTX",
-]);
 
 function dataSourcesForEvm(chain: ChainSlug): DataSourcesAvailable {
   const supported = chain !== "unsupported" && SUPPORTED_SET.has(chain);

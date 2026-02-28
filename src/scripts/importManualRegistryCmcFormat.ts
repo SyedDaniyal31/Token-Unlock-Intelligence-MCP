@@ -88,7 +88,15 @@ function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
     });
   }
 
-  return { rows, skipped };
+  // Deduplicate by (token_symbol, unlock_timestamp) to avoid "ON CONFLICT DO UPDATE cannot affect row a second time"
+  const byKey = new Map<string, ParsedRow>();
+  for (const r of rows) {
+    const key = `${r.token_symbol}|${r.unlock_timestamp}`;
+    byKey.set(key, r); // last wins
+  }
+  const deduped = [...byKey.values()];
+
+  return { rows: deduped, skipped };
 }
 
 function buildBatchValues(batch: ParsedRow[]): { sql: string; values: unknown[] } {
