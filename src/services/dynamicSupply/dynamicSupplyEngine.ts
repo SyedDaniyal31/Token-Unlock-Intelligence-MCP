@@ -830,7 +830,7 @@ function computeLiquidityStressScore(
 
 /**
  * Calendar-only output for unsupported chains when ManualRegistry has unlock data.
- * No RPC calls; only unlock pressure metrics from calendar/provider data.
+ * Uses unlock_percent from registry; no RPC calls.
  */
 function buildCalendarOnlyOutput(
   asset: AssetMetadata,
@@ -843,11 +843,19 @@ function buildCalendarOnlyOutput(
   const eventCount = events.length;
   const nextUnlockTs = unlockData.next_unlock_timestamp ?? (eventCount > 0 ? events[0].unlock_timestamp : null);
   const volume30d = Math.max(0, volume30dUsd);
-  // No RPC/price in calendar-only path; use heuristic from event count (same as buildUnlockOnlySupplyRisk).
+  // Use unlock_percent from manual registry when available; else heuristic from event count
+  const unlockPctFromEvents = events
+    .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent : 0))
+    .filter((p) => p > 0);
+  const supplyInflationPct = unlockPctFromEvents.length > 0 ? Math.max(...unlockPctFromEvents) : 0;
   const pressureRatioClean =
-    eventCount > 0 ? Math.min(1, Math.max(0, 0.2 + eventCount * 0.05)) : 0;
+    supplyInflationPct > 0
+      ? Math.min(1, Math.max(0, supplyInflationPct / 100))
+      : eventCount > 0
+        ? Math.min(1, Math.max(0, 0.2 + eventCount * 0.05))
+        : 0;
   const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
-  const liquidityScore = computeLiquidityStressScore(pressureRatioClean, 0, 0);
+  const liquidityScore = computeLiquidityStressScore(pressureRatioClean, supplyInflationPct, 0);
   const liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
   const riskTier = getRiskTier(liquidityStressRounded);
   const forwardCurve = buildForwardRiskWithUncertainty(liquidityScore, liquidityScore * 1.1, liquidityScore * 1.2, {
@@ -859,6 +867,8 @@ function buildCalendarOnlyOutput(
 
   const out = defaultOutput(1, volume30dUsd, nowSec, 0, 0, nowSec);
   out.analysis_scope = "calendar_only";
+  out.inflation_rate_30d = Number(Number(supplyInflationPct).toFixed(4));
+  out.inflation_rate_90d = Number(Number(supplyInflationPct).toFixed(4));
   out.unlock_pressure_ratio = Number(Number(pressureRatioClean).toFixed(4));
   out.unlock_pressure_classification = unlockPressureClassification;
   out.next_estimated_unlock_timestamp = nextUnlockTs;

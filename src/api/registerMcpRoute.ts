@@ -8,17 +8,12 @@
 import type { Request, Response } from "express";
 import type { RequestHandler } from "express";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
-import { getIntelligenceReport } from "./mcpController.js";
-import { getScheduleByTokenCaseInsensitive } from "../ingestion/unlockRegistry.js";
-import { resolveTokenBySymbol, createUnlockTokenRegistry } from "../utils/tokenResolver.js";
 import {
   runAnalyzeTokenSupplyRisk,
   buildSoftFailureSupplyRisk,
   buildCompletedNoDataSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
-import { fetchCoinGeckoData, normalizeCoinGeckoChainToSlug } from "../services/marketData/coingeckoClient.js";
-import { resolveAsset } from "../core/assetResolver.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -71,11 +66,11 @@ const MCP_TOOLS = [
   {
     name: UNLOCK_TOOL_NAME,
     description:
-      "Analyze upcoming token unlock and quantify sell-pressure risk using liquidity-adjusted impact scoring.",
+      "Token unlock risk analysis for ETH, BSC, Arbitrum, Base. Checks manual registry for unlock schedule (date, amount, %), fetches CoinGecko price, runs risk analysis. Returns supply inflation %, unlock pressure, risk score.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        token_symbol: { type: "string" as const, description: "Token ticker symbol (e.g. ETH, ARB)" },
+        token_symbol: { type: "string" as const, description: "Token ticker (e.g. MITO, ARB, ETH)" },
       },
       required: ["token_symbol"] as const,
     },
@@ -669,159 +664,71 @@ function supplyRiskToUnlockReport(data: SupplyRiskOutputFlat): {
   };
 }
 
+/**
+ * Unified flow: 1) Check manual registry 2) CoinGecko for price/chain 3) Risk analysis.
+ * Supports ETH, BSC, ARB, Base. Manual registry checked first; calendar-only for non-EVM when registry has data.
+ */
 async function handleAnalyzeTokenUnlock(
   id: string | number | null,
   symbol: string,
   deps: UnlockIntelligenceDeps
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
-  const registry = createUnlockTokenRegistry();
-  const resolved = await resolveTokenBySymbol(symbol, registry);
-  const schedule = resolved
-    ? await getScheduleByTokenCaseInsensitive(resolved.symbol, resolved.chain)
-    : null;
-
-  if (resolved && schedule) {
-    try {
-      const report = await Promise.race([
-        getIntelligenceReport(resolved.symbol, deps),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-        ),
-      ]);
-      const result = toUnlockResult(report);
-      if (!isValidUnlockResult(result)) {
-        return jsonRpcError(id, -32603, "Internal result validation failed.");
-      }
-      logger.info({ tool: UNLOCK_TOOL_NAME, token_symbol: symbol, risk_score: result.risk_score }, "MCP callTool success");
-      return jsonRpcSuccess(id, result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err, message, token_symbol: symbol }, "MCP analyze_token_unlock error");
-      return jsonRpcError(
-        id,
-        -32000,
-        message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
-      );
-    }
+  const symbolNorm = (symbol ?? "").trim().toUpperCase().replace(/^\$/, "");
+  if (!symbolNorm) {
+    return jsonRpcError(id, -32602, "token_symbol is required.");
   }
 
-  const symbolToResolve = resolved?.symbol ?? symbol;
-  let cgData: Awaited<ReturnType<typeof fetchCoinGeckoData>> = null;
   try {
-    cgData = await fetchCoinGeckoData(symbolToResolve);
-    if (cgData?.address && cgData?.platform_chain) {
-      const chainSlug = normalizeCoinGeckoChainToSlug(cgData.platform_chain);
-      if (chainSlug) {
-        const supplyResult = await Promise.race([
-          runAnalyzeTokenSupplyRisk(
-            { token_symbol: symbolToResolve, token_address: cgData.address, chain: chainSlug },
-            deps
-          ),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-          ),
-        ]);
-        if (supplyResult.success && supplyResult.data) {
-          const data = supplyResult.data as { status?: string };
-          if (data.status === "unsupported_chain") {
-            // Skip unlock report for unsupported chain response.
-          } else {
-            const report = supplyRiskToUnlockReport(supplyResult.data as SupplyRiskOutputFlat);
-            const result = toUnlockResult(report);
-            if (!isValidUnlockResult(result)) {
-              return jsonRpcError(id, -32603, "Internal result validation failed.");
-            }
-            logger.info(
-              { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "dynamic" },
-              "MCP callTool success (dynamic fallback)"
-            );
-            return jsonRpcSuccess(id, result);
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: CoinGecko/dynamic fallback failed");
-  }
+    // Single path: runAnalyzeTokenSupplyRisk checks manual registry first, then CoinGecko, then full analysis
+    const supplyResult = await Promise.race([
+      runAnalyzeTokenSupplyRisk({ token_symbol: symbolNorm }, deps),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
+      ),
+    ]);
 
-  const hasCgData = !!cgData;
-  const hasAddress = !!(cgData?.address);
-  const platformChain = cgData?.platform_chain ?? null;
-  if (!hasCgData && !hasAddress && platformChain === null) {
-    const asset = await resolveAsset({ symbol: symbolToResolve });
-    if (asset.supported && asset.contract_address && (asset.chain === "ethereum" || asset.chain === "bsc" || asset.chain === "arbitrum" || asset.chain === "base")) {
-      try {
-        const supplyResult = await Promise.race([
-          runAnalyzeTokenSupplyRisk(
-            { token_symbol: symbolToResolve, token_address: asset.contract_address, chain: asset.chain },
-            deps
-          ),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-          ),
-        ]);
-        if (supplyResult.success && supplyResult.data) {
-          const data = supplyResult.data as { status?: string };
-          if (data.status === "unsupported_chain") {
-            // Skip unlock report for unsupported chain response.
-          } else {
-            const report = supplyRiskToUnlockReport(supplyResult.data as SupplyRiskOutputFlat);
-            const result = toUnlockResult(report);
-            if (!isValidUnlockResult(result)) {
-              return jsonRpcError(id, -32603, "Internal result validation failed.");
-            }
-            logger.info(
-              { tool: UNLOCK_TOOL_NAME, token_symbol: symbolToResolve, risk_score: result.risk_score, source: "resolveAsset" },
-              "MCP callTool success (resolveAsset fallback)"
-            );
-            return jsonRpcSuccess(id, result);
-          }
-        }
-      } catch (err) {
-        logger.warn({ err: err instanceof Error ? err.message : String(err), token_symbol: symbolToResolve }, "Unlock: resolveAsset supply risk fallback failed");
-      }
-    }
-    if (asset.unresolved) {
-      logger.info({ symbol: symbolToResolve, classification: "NO_SCHEDULED_DATA" }, "Unlock: unresolved asset, no scheduled data");
+    if (!supplyResult?.success || !supplyResult.data) {
       return jsonRpcSuccess(id, {
         supported: false,
         classification: "NO_SCHEDULED_DATA",
-        chain_type: "non_evm",
-        message: "No unlock data found for this token. It was not found in CoinGecko, the unlock registry, or known EVM symbols. Provide token_address and chain for EVM tokens when available.",
+        message: "No unlock data found for this token.",
         unlock_pressure_ratio: 0,
         volume_impact_ratio: 0,
         supply_inflation_percent: 0,
         risk_score: 0,
       });
     }
-    logger.warn(
-      { symbol: symbolToResolve },
-      "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"
-    );
-    logger.info(
-      {
-        symbol: symbolToResolve,
+
+    const data = supplyResult.data as SupplyRiskOutputFlat & { status?: string; analysis_scope?: string };
+    if (data.status === "unsupported_chain" && data.analysis_scope !== "calendar_only") {
+      const unsupported = data as { message?: string; detected_chain?: string };
+      return jsonRpcSuccess(id, {
         supported: false,
-        classification: "NATIVE_CHAIN_ASSET",
-      },
-      "Unlock: native chain asset (non-EVM)"
+        classification: "UNSUPPORTED_CHAIN",
+        message: unsupported.message ?? `Token runs on ${unsupported.detected_chain ?? "unsupported chain"}. Supported: ethereum, bsc, arbitrum, base.`,
+        unlock_pressure_ratio: 0,
+        volume_impact_ratio: 0,
+        supply_inflation_percent: 0,
+        risk_score: 0,
+      });
+    }
+
+    const report = supplyRiskToUnlockReport(data);
+    const result = toUnlockResult(report);
+    if (!isValidUnlockResult(result)) {
+      return jsonRpcError(id, -32603, "Internal result validation failed.");
+    }
+    logger.info({ tool: UNLOCK_TOOL_NAME, token_symbol: symbolNorm, risk_score: result.risk_score }, "MCP callTool success");
+    return jsonRpcSuccess(id, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, token_symbol: symbolNorm }, "MCP analyze_token_unlock error");
+    return jsonRpcError(
+      id,
+      -32000,
+      message.includes("timed out") ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
     );
-    return jsonRpcSuccess(id, {
-      supported: false,
-      classification: "NATIVE_CHAIN_ASSET",
-      chain_type: "non_evm",
-      message: "Token is native to a non-EVM chain. Unlock schedules must be sourced from protocol documentation.",
-      unlock_pressure_ratio: 0,
-      volume_impact_ratio: 0,
-      supply_inflation_percent: 0,
-      risk_score: 0,
-    });
   }
-  logger.warn(
-    { symbol: symbolToResolve, hasCgData, hasAddress, platform_chain: platformChain },
-    "UNLOCK_TOKEN_NATIVE_CHAIN_UNSUPPORTED"
-  );
-  return jsonRpcError(id, -32000, "Token not supported on ethereum, bsc, arbitrum, or base.");
 }
 
 async function handleAnalyzeTokenSupplyRisk(
