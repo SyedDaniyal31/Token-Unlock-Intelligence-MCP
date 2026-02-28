@@ -19,6 +19,8 @@ export const manualRegistryProvider: UnlockProvider = {
     try {
       const nowSec = Math.floor(Date.now() / 1000);
       const symbol = asset.symbol.toUpperCase().trim();
+      // Include past 90 days + future so schedule data is available even when next unlock is in the past.
+      const minTimestamp = nowSec - 90 * 24 * 60 * 60;
       const result = await query<{
         token_symbol: string;
         unlock_timestamp: string | number;
@@ -32,7 +34,7 @@ export const manualRegistryProvider: UnlockProvider = {
            AND unlock_timestamp > $2
          ORDER BY unlock_timestamp ASC
          LIMIT 500`,
-        [symbol, nowSec]
+        [symbol, minTimestamp]
       );
 
       const rows = result?.rows ?? [];

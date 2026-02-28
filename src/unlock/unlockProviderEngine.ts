@@ -73,15 +73,17 @@ export async function resolveUnlockData(asset: AssetMetadata): Promise<UnlockFet
 
       if (result.success && result.events.length > 0) {
         const future = filterFutureAndSort(result.events, nowSec);
-        if (future.length === 0) continue;
+        // Use future events if any; otherwise use all events (past-only) so unlock_data_available stays true.
+        const eventsToUse = future.length > 0 ? future : result.events;
+        const nextTs = future.length > 0 ? future[0].unlock_timestamp : null;
         if (result.source === "ManualRegistry") {
-          logger.info({ symbol: asset.symbol }, "MANUAL_REGISTRY_HIT");
+          logger.info({ symbol: asset.symbol, futureCount: future.length, totalCount: result.events.length }, "MANUAL_REGISTRY_HIT");
         }
         const out: UnlockFetchResult = {
           success: true,
           source: result.source,
-          events: future,
-          next_unlock_timestamp: future[0]?.unlock_timestamp ?? null,
+          events: eventsToUse,
+          next_unlock_timestamp: nextTs,
           confidence_score: result.confidence_score,
         };
         setCachedUnlock(key, out);
