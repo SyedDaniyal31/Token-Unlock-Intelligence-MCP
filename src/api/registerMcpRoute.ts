@@ -1235,7 +1235,7 @@ export function registerMcpRoute(
       (path.includes("token-unlock-intelligence-mcp") && path.includes("mcp"));
     if (isMalformedMcpPath) {
       logger.warn({ path, pathDecoded }, "Context malformed path workaround: treating as POST /mcp");
-      void handler(req, res);
+      void handler(req, res, () => {});
       return;
     }
     next();
