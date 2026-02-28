@@ -8,8 +8,6 @@
  * Inference never overwrites real unlock data.
  */
 
-import { getUnlockPressureClassification, type UnlockPressureClassification } from "../core/quantitativeAnalytics.js";
-
 /** Hierarchy: registry > scanner > inferred. */
 export const UNLOCK_SOURCE_REGISTRY = "registry";
 export const UNLOCK_SOURCE_SCANNER = "scanner";
@@ -36,7 +34,6 @@ export interface SupplyShockInferenceInput {
 
 export interface SupplyShockInferenceOutput {
   unlock_model: typeof INFERRED_UNLOCK_MODEL;
-  unlock_pressure_classification: UnlockPressureClassification;
   confidence_score: number;
   inference_source: typeof INFERENCE_SOURCE;
   synthetic_unlock_pressure: number;
@@ -82,16 +79,14 @@ function computeInferenceConfidence(input: SupplyShockInferenceInput): number {
 
 /**
  * Run supply shock inference only when unlock_data_available === false.
- * Returns inferred unlock_model, unlock_pressure_classification, confidence_score,
- * inference_source, and synthetic_unlock_pressure. Never overwrites real unlock data.
+ * Returns inferred unlock_model, confidence_score, inference_source, and synthetic_unlock_pressure.
+ * Never overwrites real unlock data.
  */
 export function inferSupplyShockUnlock(input: SupplyShockInferenceInput): SupplyShockInferenceOutput {
   const synthetic_unlock_pressure = computeSyntheticUnlockPressure(input);
-  const unlock_pressure_classification = getUnlockPressureClassification(synthetic_unlock_pressure);
   const confidence_score = computeInferenceConfidence(input);
   return {
     unlock_model: INFERRED_UNLOCK_MODEL,
-    unlock_pressure_classification,
     confidence_score,
     inference_source: INFERENCE_SOURCE,
     synthetic_unlock_pressure,

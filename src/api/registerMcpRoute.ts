@@ -14,6 +14,7 @@ import {
   buildCompletedNoDataSupplyRisk,
   type SupplyRiskOutputFlat,
 } from "../tools/analyze_token_supply_risk.js";
+import { computeUnlockRisk } from "../core/unlockRiskModel.js";
 import logger from "../core/logger.js";
 
 // ---------------------------------------------------------------------------
@@ -127,10 +128,6 @@ const MCP_TOOLS = [
         supply_volatility_index: { type: "number" as const },
         emission_trend: { type: "number" as const },
         unlock_pressure_ratio: { type: "number" as const, description: "Scheduled unlock pressure from calendar/scanner; 0 when no unlock data." },
-        unlock_pressure_classification: {
-          type: "string" as const,
-          description: "LOW | MODERATE | HIGH | EXTREME from scheduled unlocks; NO_SCHEDULED_DATA when no calendar/scanner data.",
-        },
         fused_volume_30d_usd: { type: "number" as const },
         liquidity_stress_score: { type: "number" as const },
         cliff_detected: { type: "boolean" as const },
@@ -170,7 +167,11 @@ const MCP_TOOLS = [
         emission_acceleration_score: { type: "number" as const },
         simulation_outcome: { type: ["object", "null"] as const },
         risk_flags: { type: "array" as const, items: { type: "string" as const } },
-        risk_tier: { type: "string" as const },
+        final_risk_tier: { type: "string" as const, description: "MINOR | ELEVATED | HIGH | CRITICAL from composite score." },
+        event_severity_label: { type: "string" as const },
+        absorption_risk_label: { type: "string" as const },
+        timing_urgency_label: { type: "string" as const },
+        composite_score: { type: "number" as const },
         result_integrity_hash: { type: "string" as const },
         engine_latency_ms: { type: "number" as const },
         data_quality_score: { type: "number" as const },
@@ -248,15 +249,6 @@ const MCP_TOOLS = [
           type: "number" as const,
           description: "Confidence in inferred unlock metrics (0–100).",
         },
-        supply_shock_index: {
-          type: "number" as const,
-          description: "Supply Shock Fusion Index (SSI) 0–100.",
-        },
-        supply_shock_risk_tier: {
-          type: "string" as const,
-          enum: ["LOW", "MODERATE", "HIGH", "EXTREME"] as const,
-          description: "SSI risk tier: 0–25 LOW, 26–50 MODERATE, 51–75 HIGH, 76–100 EXTREME.",
-        },
         supply_unlock_percent: {
           type: "number" as const,
           description: "Unlock amount / circulating supply (0–1). Supply shock severity layer.",
@@ -269,10 +261,6 @@ const MCP_TOOLS = [
         inferred_distribution_pressure: {
           type: "number" as const,
           description: "Inferred supply/distribution pressure when no scheduled unlock data; 0 or omitted when unlock data available.",
-        },
-        inferred_distribution_classification: {
-          type: "string" as const,
-          description: "Risk classification of inferred distribution pressure (e.g. MODERATE); only set when unlock_data_available is false.",
         },
         unlock_event_assessment: {
           type: "object" as const,
@@ -307,7 +295,6 @@ const MCP_TOOLS = [
         "supply_volatility_index",
         "emission_trend",
         "unlock_pressure_ratio",
-        "unlock_pressure_classification",
         "fused_volume_30d_usd",
         "liquidity_stress_score",
         "cliff_detected",
@@ -323,7 +310,7 @@ const MCP_TOOLS = [
         "emission_acceleration_score",
         "simulation_outcome",
         "risk_flags",
-        "risk_tier",
+        "final_risk_tier",
         "result_integrity_hash",
         "engine_latency_ms",
         "data_quality_score",
@@ -414,19 +401,40 @@ function normalizeSupplyRiskResult(
   return jsonRpcSuccess(id, softFailure);
 }
 
-/** Severity classification from unlock percent (0–1). */
-function classifyEventSeverity(unlockPercent: number): "EXTREME" | "HIGH" | "ELEVATED" | "MODERATE" {
-  if (unlockPercent >= 0.25) return "EXTREME";
-  if (unlockPercent >= 0.1) return "HIGH";
-  if (unlockPercent >= 0.05) return "ELEVATED";
-  return "MODERATE";
-}
-
-/** Liquidity absorption from liquidity_stress_score (0–100). */
-function classifyLiquidityAbsorption(score: number): "LOW" | "MODERATE" | "HIGH" {
-  if (score <= 33) return "LOW";
-  if (score <= 66) return "MODERATE";
-  return "HIGH";
+/** Use new risk model for severity/absorption/timing labels. */
+function getRiskLabels(obj: Record<string, unknown>): {
+  event_severity_label: string;
+  absorption_risk_label: string;
+  timing_urgency_label: string;
+  composite_score: number;
+  final_risk_tier: string;
+} {
+  const pct = typeof obj.supply_unlock_percent === "number" && Number.isFinite(obj.supply_unlock_percent as number)
+    ? (obj.supply_unlock_percent as number)
+    : 0;
+  const unlockAmount = typeof obj.unlock_amount_usd === "number" && Number.isFinite(obj.unlock_amount_usd as number)
+    ? (obj.unlock_amount_usd as number)
+    : 0;
+  const fusedVol = typeof obj.fused_volume_30d_usd === "number" && Number.isFinite(obj.fused_volume_30d_usd as number)
+    ? (obj.fused_volume_30d_usd as number)
+    : 0;
+  const avgDaily = fusedVol > 0 ? fusedVol / 30 : 1;
+  const nextTs = typeof obj.next_estimated_unlock_timestamp === "number" && Number.isFinite(obj.next_estimated_unlock_timestamp as number)
+    ? (obj.next_estimated_unlock_timestamp as number)
+    : null;
+  const r = computeUnlockRisk({
+    unlock_percent_of_circulating: pct,
+    unlock_amount: unlockAmount,
+    avg_daily_volume: avgDaily,
+    next_unlock_timestamp: nextTs,
+  });
+  return {
+    event_severity_label: r.event_severity_label,
+    absorption_risk_label: r.absorption_risk_label,
+    timing_urgency_label: r.timing_urgency_label,
+    composite_score: r.composite_score,
+    final_risk_tier: r.final_risk_tier,
+  };
 }
 
 /** Human-readable date from Unix timestamp. */
@@ -478,39 +486,43 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     ? (obj.unlock_amount_usd as number)
     : undefined;
 
-  const severity = classifyEventSeverity(supplyUnlockPct);
+  const riskLabels = getRiskLabels(obj);
   const magnitudePct = Number((supplyUnlockPct * 100).toFixed(1));
   const eventDate = nextTs != null ? formatEventDate(nextTs) : null;
   const daysUntilUnlock = nextTs != null ? Math.max(0, Math.ceil((nextTs - now) / 86400)) : null;
   const volumeRatioDays = Number((unlockPressureRatio * 30).toFixed(1));
-  const liquidityAbsorption = classifyLiquidityAbsorption(liquidityStress);
 
   out.unlock_event_assessment = {
-    severity,
+    severity: riskLabels.event_severity_label,
     unlock_percent_of_total_supply: magnitudePct,
     unlock_amount: unlockAmountUsd ?? null,
     unlock_date: eventDate,
     days_until_unlock: daysUntilUnlock,
+    event_severity_label: riskLabels.event_severity_label,
+    absorption_risk_label: riskLabels.absorption_risk_label,
+    timing_urgency_label: riskLabels.timing_urgency_label,
+    composite_score: riskLabels.composite_score,
+    final_risk_tier: riskLabels.final_risk_tier,
   };
 
   const marketInterpretation = getMarketInterpretation(supplyUnlockPct);
 
   out.market_impact_analysis = {
     volume_ratio_days: volumeRatioDays,
-    liquidity_absorption_classification: liquidityAbsorption,
+    liquidity_absorption_classification: riskLabels.absorption_risk_label,
     market_interpretation: marketInterpretation,
   };
 
   const lines: string[] = [];
   lines.push("=== Unlock Event Assessment ===");
-  lines.push(`Severity: ${severity}`);
+  lines.push(`Severity: ${riskLabels.event_severity_label}`);
   lines.push(`Magnitude: ${magnitudePct}% of total supply`);
   lines.push(`Event Date: ${eventDate ?? "—"}`);
   lines.push(`Days Until Event: ${daysUntilUnlock != null ? `${daysUntilUnlock} days` : "—"}`);
   lines.push("");
   lines.push("=== Market Impact Analysis ===");
   lines.push(`Unlock equals ${volumeRatioDays} days of average trading volume.`);
-  lines.push(`Liquidity absorption classified as ${liquidityAbsorption}.`);
+  lines.push(`Liquidity absorption classified as ${riskLabels.absorption_risk_label}.`);
   lines.push("");
   lines.push("=== Market Interpretation ===");
   lines.push(marketInterpretation);
@@ -530,8 +542,11 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
   out.token_symbol = obj.token_symbol;
   out.analysis_scope = obj.analysis_scope === "calendar_only" ? "scheduled_unlock" : obj.analysis_scope;
   out.unlock_pressure_ratio = obj.unlock_pressure_ratio;
-  out.supply_shock_index = obj.supply_shock_index;
-  out.supply_shock_risk_tier = obj.supply_shock_risk_tier;
+  out.event_severity_label = riskLabels.event_severity_label;
+  out.absorption_risk_label = riskLabels.absorption_risk_label;
+  out.timing_urgency_label = riskLabels.timing_urgency_label;
+  out.composite_score = riskLabels.composite_score;
+  out.final_risk_tier = riskLabels.final_risk_tier;
   out.analysis_timestamp = obj.analysis_timestamp;
   out.engine_version = obj.engine_version;
 
@@ -683,8 +698,8 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const emitAcc = o.emission_acceleration_score;
   const riskFlags = o.risk_flags;
   const validRiskFlags = Array.isArray(riskFlags) && riskFlags.every((f) => typeof f === "string");
-  const riskTier = o.risk_tier;
-  const validRiskTier = typeof riskTier === "string";
+  const finalRiskTier = o.final_risk_tier;
+  const validFinalRiskTier = typeof finalRiskTier === "string";
   const hash = o.result_integrity_hash;
   const validHash = typeof hash === "string";
   const latency = o.engine_latency_ms;
@@ -729,7 +744,6 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
   const validDataFreshnessSeconds = typeof dataFreshnessSeconds === "number" && Number.isFinite(dataFreshnessSeconds) && dataFreshnessSeconds >= 0;
   const inf90 = o.inflation_rate_90d;
   const volIdx = o.supply_volatility_index;
-  const pressureClass = o.unlock_pressure_classification;
   const fusedVol = o.fused_volume_30d_usd;
   const cliffPct = o.cliff_size_percent;
   const patternType = o.unlock_pattern_type;
@@ -743,7 +757,6 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
     typeof volIdx === "number" && Number.isFinite(volIdx as number) && (volIdx as number) >= 0 && (volIdx as number) <= 100 &&
     typeof o.emission_trend === "number" && Number.isFinite(o.emission_trend as number) &&
     typeof o.unlock_pressure_ratio === "number" && Number.isFinite(o.unlock_pressure_ratio as number) &&
-    typeof pressureClass === "string" &&
     typeof fusedVol === "number" && Number.isFinite(fusedVol as number) && (fusedVol as number) >= 0 &&
     typeof o.liquidity_stress_score === "number" && Number.isFinite(o.liquidity_stress_score as number) &&
     (o.liquidity_stress_score as number) >= 0 && (o.liquidity_stress_score as number) <= 100 &&
@@ -760,7 +773,7 @@ function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat 
     typeof emitAcc === "number" && Number.isFinite(emitAcc as number) && (emitAcc as number) >= 0 && (emitAcc as number) <= 100 &&
     validSim &&
     validRiskFlags &&
-    validRiskTier &&
+    validFinalRiskTier &&
     validHash &&
     validLatency &&
     validDataQuality &&
@@ -1042,11 +1055,42 @@ function handleInitialize(id: string | number | null): JsonRpcSuccess {
 // POST /mcp handler
 // ---------------------------------------------------------------------------
 
+/**
+ * Register SSE endpoint for MCP clients that expect text/event-stream (e.g. Context Protocol).
+ * GET /mcp/sse and GET /sse return Content-Type: text/event-stream.
+ */
+function registerSseEndpoint(app: { get?: (path: string, ...handlers: RequestHandler[]) => void }): void {
+  if (typeof app.get !== "function") return;
+  const sseHandler: RequestHandler = (req: Request, res: Response): void => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const baseUrl = `${req.protocol}://${req.get("host") || "localhost"}`;
+    res.write(`event: endpoint\ndata: ${JSON.stringify({ url: `${baseUrl}/mcp` })}\n\n`);
+
+    const ping = setInterval(() => {
+      try {
+        res.write(`: ping ${Date.now()}\n\n`);
+      } catch {
+        clearInterval(ping);
+      }
+    }, 15000);
+
+    req.on("close", () => clearInterval(ping));
+  };
+  app.get("/mcp/sse", sseHandler);
+  app.get("/sse", sseHandler);
+}
+
 export function registerMcpRoute(
-  app: { post: (path: string, ...handlers: RequestHandler[]) => void },
+  app: { post: (path: string, ...handlers: RequestHandler[]) => void; get?: (path: string, ...handlers: RequestHandler[]) => void },
   deps: UnlockIntelligenceDeps,
   middleware: RequestHandler[] = []
 ): void {
+  registerSseEndpoint(app);
   const handler: RequestHandler = async (req: Request, res: Response): Promise<void> => {
     try {
       const body = parseBody(req.body);

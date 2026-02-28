@@ -30,14 +30,12 @@ import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
-import { computeSupplyShockFusion } from "../../intelligence/supplyShockFusion.js";
+import { computeUnlockRisk } from "../../core/unlockRiskModel.js";
 import {
   buildForwardRiskWithUncertainty,
   buildModelMetadata,
   buildDataFreshness,
   buildRiskFlags,
-  getRiskTier,
-  getUnlockPressureClassification,
   computeVolumeFusion,
   computeConcentrationRisk,
   computeLiquidityDepthProfile,
@@ -57,24 +55,6 @@ import {
 
 const REQUEST_TIMEOUT_MS = 8000;
 
-/** Supply shock severity from unlock_percent_of_supply (decimal 0–1). Additive override layer. */
-function classifySupplyShock(percent: number): "LOW" | "MODERATE" | "HIGH" | "EXTREME" {
-  if (percent >= 0.15) return "EXTREME";
-  if (percent >= 0.05) return "HIGH";
-  if (percent >= 0.02) return "MODERATE";
-  return "LOW";
-}
-
-/** Risk tier order for override: LOW < MODERATE < HIGH < EXTREME. */
-const RISK_TIER_ORDER = ["LOW", "MODERATE", "HIGH", "EXTREME"] as const;
-function riskTierIndex(tier: string): number {
-  const i = RISK_TIER_ORDER.indexOf(tier as (typeof RISK_TIER_ORDER)[number]);
-  return i >= 0 ? i : 0;
-}
-function maxRiskTier(a: string, b: string): string {
-  return riskTierIndex(a) >= riskTierIndex(b) ? a : b;
-}
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new Error("Dynamic engine aborted");
 }
@@ -82,7 +62,7 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 /**
  * Internal deterministic test harness: same input → same output.
  * Verification: call twice with identical input (same token, chain, executionNowMs, price, deadline)
- * and assert deep equality of liquidity_stress_score, risk_flags, risk_tier, unlock_amount_usd,
+ * and assert deep equality of liquidity_stress_score, risk_flags, final_risk_tier, unlock_amount_usd,
  * unlock_market_cap_impact, forward_risk_curve. Do not use Date.now() in test input.
  */
 async function deterministicTestWrapper(input: DynamicSupplyInput): Promise<DynamicSupplyOutput> {
@@ -97,7 +77,6 @@ export interface DynamicSupplyOutput {
   supply_volatility_index: number;
   emission_trend: number;
   unlock_pressure_ratio: number;
-  unlock_pressure_classification: string;
   fused_volume_30d_usd: number;
   liquidity_stress_score: number;
   cliff_detected: boolean;
@@ -113,7 +92,8 @@ export interface DynamicSupplyOutput {
   emission_acceleration_score: number;
   simulation_outcome: SimulationOutcome | null;
   risk_flags: string[];
-  risk_tier: string;
+  /** New risk model: MINOR | ELEVATED | HIGH | CRITICAL. */
+  final_risk_tier: string;
   data_quality_score: number;
   historical_depth_limited: boolean;
   holder_data_confidence_score: number;
@@ -150,19 +130,15 @@ export interface DynamicSupplyOutput {
   confidence_score?: number;
   /** Unlock intelligence source: registry > external_calendar > scanner > inferred. */
   unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
-  /** Supply Shock Fusion Index (0–100) and risk tier. */
-  supply_shock_index?: number;
-  supply_shock_risk_tier?: string;
-  /** Unlock amount / circulating supply (0–1). Supply shock severity layer. */
+  /** Unlock amount / circulating supply (0–1). */
   supply_unlock_percent?: number;
-  /** Supply shock classification: LOW | MODERATE | HIGH | EXTREME. */
-  supply_unlock_classification?: string;
-  /** True when high unlock + high liquidity stress triggered SSI cascade boost. */
-  cascade_risk_detected?: boolean;
+  /** New risk model outputs. */
+  event_severity_label?: string;
+  absorption_risk_label?: string;
+  timing_urgency_label?: string;
+  composite_score?: number;
   /** Inferred supply/distribution pressure when no scheduled unlock data; only set when unlock_data_available is false. */
   inferred_distribution_pressure?: number;
-  /** Risk classification of inferred distribution pressure (e.g. MODERATE); only set when unlock_data_available is false. */
-  inferred_distribution_classification?: string;
   /** Set when engine returns early (e.g. INVALID_SUPPLY) for structured no-data. */
   no_results_reason?: string;
 }
@@ -175,12 +151,6 @@ function toNum(x: unknown): number {
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
-}
-
-const TIER_ORDER = { LOW: 0, MODERATE: 1, HIGH: 2, EXTREME: 3 } as const;
-type Tier = keyof typeof TIER_ORDER;
-function combineRiskTiers(a: Tier, b: Tier): Tier {
-  return TIER_ORDER[a] >= TIER_ORDER[b] ? a : b;
 }
 
 const LIQUIDITY_FREE_FLOAT_THRESHOLD_USD = 10_000_000;
@@ -494,12 +464,6 @@ export async function runDynamicSupplyEngine(
     }
     supplyUnlockPercent = Math.min(1, Math.max(0, supplyUnlockPercent));
   }
-  const supplyUnlockClassification = classifySupplyShock(supplyUnlockPercent);
-  logger.info(
-    { supply_unlock_percent: supplyUnlockPercent, supply_unlock_classification: supplyUnlockClassification },
-    "SUPPLY_SHOCK_CLASSIFICATION_COMPUTED"
-  );
-
   const hasUnlockData = unlock_data_available;
   const hasOnchainData = totalSupply > 0;
 
@@ -602,10 +566,6 @@ export async function runDynamicSupplyEngine(
   const volumeVariance = 1 - Math.min(100, Math.max(0, volume_source_consistency_score)) / 100;
   if (!Number.isFinite(inflation90d)) inflation90d = inflation30d * 3;
   supplyVolatilityIndex = computeSupplyVolatilityIndex([inflation30d, inflation90d]);
-  const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
-
-  const unlockRiskScore: Tier | null = hasUnlockData ? (unlockPressureClassification as Tier) : null;
-  const supplyRiskScore: Tier | null = hasOnchainData ? (getRiskTier(liquidityStressRounded) as Tier) : null;
 
   const forwardCurve = buildForwardRiskWithUncertainty(risk30d, risk90d, risk180d, {
     volatilityHint: pressureRatioClean > 0.5 ? 0.4 : 0.2,
@@ -683,7 +643,6 @@ export async function runDynamicSupplyEngine(
     supply_volatility_index: Math.min(100, Math.max(0, supplyVolatilityIndex)),
     emission_trend: Number(Number(emissionTrend).toFixed(4)),
     unlock_pressure_ratio: Number(Number(pressureRatioClean).toFixed(4)),
-    unlock_pressure_classification: unlockPressureClassification,
     fused_volume_30d_usd: toNum(fused_volume_30d_usd),
     liquidity_stress_score: liquidityStressRounded,
     cliff_detected: cliffDetected,
@@ -703,7 +662,7 @@ export async function runDynamicSupplyEngine(
     emission_acceleration_score: Math.min(100, Math.max(0, emissionAcceleration)),
     simulation_outcome,
     risk_flags: riskFlags,
-    risk_tier: getRiskTier(liquidityStressRounded),
+    final_risk_tier: "MINOR",
     data_quality_score: dataQualityScore,
     historical_depth_limited: true,
     holder_data_confidence_score: Math.min(100, Math.max(0, holderDataConfidenceScore)),
@@ -718,20 +677,10 @@ export async function runDynamicSupplyEngine(
     },
   };
 
-  // Layered risk and analysis scope (no short-circuit; liquidity/supply always computed when onchain data exists).
-  if (unlockRiskScore != null && supplyRiskScore != null) {
-    out.risk_tier = combineRiskTiers(unlockRiskScore, supplyRiskScore);
-    out.analysis_scope = "combined";
-  } else if (unlockRiskScore != null) {
-    out.risk_tier = unlockRiskScore;
-    out.analysis_scope = "unlock_only";
-  } else if (supplyRiskScore != null) {
-    out.risk_tier = supplyRiskScore;
-    out.analysis_scope = "supply_only";
-  } else {
-    out.risk_tier = "INSUFFICIENT_DATA";
-    out.analysis_scope = "insufficient";
-  }
+  if (hasUnlockData && hasOnchainData) out.analysis_scope = "combined";
+  else if (hasUnlockData) out.analysis_scope = "unlock_only";
+  else if (hasOnchainData) out.analysis_scope = "supply_only";
+  else out.analysis_scope = "insufficient";
   out.unlock_data_source = unlockIntelSource;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
   out.unlock_provider = providerUsed;
@@ -761,9 +710,7 @@ export async function runDynamicSupplyEngine(
     });
     // Scheduled unlock fields: ONLY represent calendar/provider data. Never assign inferred values to them.
     out.unlock_pressure_ratio = 0;
-    out.unlock_pressure_classification = "NO_SCHEDULED_DATA";
     out.inferred_distribution_pressure = Number(Number(inferred.synthetic_unlock_pressure).toFixed(4));
-    out.inferred_distribution_classification = inferred.unlock_pressure_classification;
     out.unlock_model = inferred.unlock_model;
     out.inference_source = inferred.inference_source;
     out.confidence_score = inferred.confidence_score;
@@ -836,35 +783,27 @@ export async function runDynamicSupplyEngine(
     };
   }
 
-  // IMPORTANT: SSI must only reflect scheduled unlock pressure. Unlock term is 0 when ratio is 0 or weighting is 0.
-  // Inferred distribution pressure is informational and must not inflate SSI.
-  const ssi = computeSupplyShockFusion({
-    unlock_pressure_ratio: out.unlock_pressure_ratio,
-    liquidity_stress_score: out.liquidity_stress_score,
-    supply_volatility_index: out.supply_volatility_index,
-    inflation_rate_30d: out.inflation_rate_30d,
-    confidence_score: out.confidence_score ?? 100,
-    unlock_provider_confidence: providerUsed === "none" ? 0 : (typeof unlockData.confidence_score === "number" ? unlockData.confidence_score : 0),
-  });
-  out.supply_shock_index = ssi.supply_shock_index;
-  out.supply_shock_risk_tier = ssi.supply_shock_risk_tier;
-  if (ssi.cascade_risk_detected !== undefined) out.cascade_risk_detected = ssi.cascade_risk_detected;
-
-  // Supply shock severity override: large unlock % must elevate risk tier (additive, does not remove SSI)
   if (unlock_data_available) {
     out.supply_unlock_percent = Number(Number(supplyUnlockPercent).toFixed(4));
-    out.supply_unlock_classification = supplyUnlockClassification;
-    if (supplyUnlockClassification === "EXTREME") {
-      out.risk_tier = "HIGH";
-    } else if (supplyUnlockClassification === "HIGH") {
-      out.risk_tier = maxRiskTier(out.risk_tier, "MODERATE");
-    }
   }
+
+  // Apply new risk model (severity, absorption, timing → composite → final_risk_tier)
+  const avgDailyVolume = out.fused_volume_30d_usd > 0 ? out.fused_volume_30d_usd / 30 : 1;
+  const riskModel = computeUnlockRisk({
+    unlock_percent_of_circulating: out.supply_unlock_percent ?? 0,
+    unlock_amount: out.unlock_amount_usd ?? 0,
+    avg_daily_volume: avgDailyVolume,
+    next_unlock_timestamp: out.next_estimated_unlock_timestamp,
+  });
+  out.final_risk_tier = riskModel.final_risk_tier;
+  out.event_severity_label = riskModel.event_severity_label;
+  out.absorption_risk_label = riskModel.absorption_risk_label;
+  out.timing_urgency_label = riskModel.timing_urgency_label;
+  out.composite_score = riskModel.composite_score;
 
   // When scheduled unlock exists, inferred fields must not appear (mutual exclusivity).
   if (out.analysis_provenance.unlock_data_available && out.inferred_distribution_pressure != null) {
     delete out.inferred_distribution_pressure;
-    delete out.inferred_distribution_classification;
   }
 
   logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
@@ -925,10 +864,8 @@ function buildCalendarOnlyOutput(
       : eventCount > 0
         ? Math.min(1, Math.max(0, 0.2 + eventCount * 0.05))
         : 0;
-  const unlockPressureClassification = getUnlockPressureClassification(pressureRatioClean);
   const liquidityScore = computeLiquidityStressScore(pressureRatioClean, supplyInflationPct, 0);
   const liquidityStressRounded = Math.round(clamp(liquidityScore, 0, 100));
-  const riskTier = getRiskTier(liquidityStressRounded);
   const forwardCurve = buildForwardRiskWithUncertainty(liquidityScore, liquidityScore * 1.1, liquidityScore * 1.2, {
     volatilityHint: pressureRatioClean > 0.5 ? 0.4 : 0.2,
     dataQuality: 0.6,
@@ -941,24 +878,23 @@ function buildCalendarOnlyOutput(
   out.inflation_rate_30d = Number(Number(supplyInflationPct).toFixed(4));
   out.inflation_rate_90d = Number(Number(supplyInflationPct).toFixed(4));
   out.unlock_pressure_ratio = Number(Number(pressureRatioClean).toFixed(4));
-  out.unlock_pressure_classification = unlockPressureClassification;
   out.next_estimated_unlock_timestamp = nextUnlockTs;
   out.liquidity_stress_score = liquidityStressRounded;
   const supplyUnlockPct = supplyInflationPct / 100;
-  const supplyShockClass = classifySupplyShock(supplyUnlockPct);
   out.supply_unlock_percent = Number(Number(supplyUnlockPct).toFixed(4));
-  out.supply_unlock_classification = supplyShockClass;
-  if (supplyShockClass === "EXTREME") {
-    out.risk_tier = "HIGH";
-  } else if (supplyShockClass === "HIGH") {
-    out.risk_tier = maxRiskTier(riskTier, "MODERATE");
-  } else {
-    out.risk_tier = riskTier;
-  }
-  logger.info(
-    { supply_unlock_percent: supplyUnlockPct, supply_unlock_classification: supplyShockClass },
-    "SUPPLY_SHOCK_CLASSIFICATION_COMPUTED"
-  );
+  const unlockAmountUsd = 0;
+  const avgDailyVolume = volume30d > 0 ? volume30d / 30 : 1;
+  const riskModel = computeUnlockRisk({
+    unlock_percent_of_circulating: supplyUnlockPct,
+    unlock_amount: unlockAmountUsd,
+    avg_daily_volume: avgDailyVolume,
+    next_unlock_timestamp: nextUnlockTs,
+  });
+  out.final_risk_tier = riskModel.final_risk_tier;
+  out.event_severity_label = riskModel.event_severity_label;
+  out.absorption_risk_label = riskModel.absorption_risk_label;
+  out.timing_urgency_label = riskModel.timing_urgency_label;
+  out.composite_score = riskModel.composite_score;
   out.forward_risk_curve = forwardCurve;
   out.risk_flags = pressureRatioClean > 0 ? ["UNLOCK_SCHEDULE", "SCHEDULED_UNLOCK"] : ["SCHEDULED_UNLOCK"];
   out.token_symbol = asset.symbol;
@@ -1010,7 +946,6 @@ export function defaultOutput(
     supply_volatility_index: 0,
     emission_trend: 0,
     unlock_pressure_ratio: Number(Number(ratio).toFixed(4)),
-    unlock_pressure_classification: getUnlockPressureClassification(ratio),
     fused_volume_30d_usd: fused,
     liquidity_stress_score: 0,
     cliff_detected: false,
@@ -1031,7 +966,7 @@ export function defaultOutput(
     emission_acceleration_score: 0,
     simulation_outcome: null,
     risk_flags: ["NO_DATA"],
-    risk_tier: "INSUFFICIENT_UNLOCK_DATA",
+    final_risk_tier: "MINOR",
     data_quality_score: 0,
     analysis_provenance: {
       primary_model: "dynamic_unlock",
@@ -1039,7 +974,5 @@ export function defaultOutput(
       unlock_data_available: false,
       confidence_basis: "holder_distribution",
     },
-    supply_shock_index: 0,
-    supply_shock_risk_tier: "LOW",
   };
 }

@@ -63,11 +63,16 @@ app.get("/", (_req: Request, res: Response): void => {
   });
 });
 
-app.get("/mcp", (_req: Request, res: Response): void => {
+app.get("/mcp", (req: Request, res: Response): void => {
+  const accept = (req.get("Accept") || "").toLowerCase();
+  if (accept.includes("text/event-stream")) {
+    res.redirect(302, "/mcp/sse");
+    return;
+  }
   res.status(200).json({
     ok: true,
     protocol: "mcp",
-    message: "POST JSON-RPC: initialize, listTools (or tools/list), callTool (or tools/call).",
+    message: "POST JSON-RPC: initialize, listTools (or tools/list), callTool (or tools/call). SSE: GET /mcp/sse",
   });
 });
 

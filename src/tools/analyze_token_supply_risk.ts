@@ -26,7 +26,6 @@ import {
   computeHolderDataConfidenceScore,
   computeCombinedVolatilityIndex,
   computePatternConfidenceScore,
-  getUnlockPressureClassification,
   computeUnlockPatternType,
   runShockSimulation,
 } from "../core/quantitativeAnalytics.js";
@@ -41,11 +40,10 @@ import {
   buildModelMetadata,
   buildDataFreshness,
   buildRiskFlags,
-  getRiskTier,
   computeDataQualityScore,
 } from "../core/quantitativeAnalytics.js";
 import { computeResultIntegrityHash } from "../core/resultIntegrity.js";
-import { computeSupplyShockFusion } from "../intelligence/supplyShockFusion.js";
+import { computeUnlockRisk } from "../core/unlockRiskModel.js";
 import {
   canonicalCacheKey,
   getCachedResult,
@@ -95,7 +93,6 @@ export interface SupplyRiskOutputFlat {
   supply_volatility_index: number;
   emission_trend: number;
   unlock_pressure_ratio: number;
-  unlock_pressure_classification: string;
   fused_volume_30d_usd: number;
   liquidity_stress_score: number;
   cliff_detected: boolean;
@@ -113,7 +110,7 @@ export interface SupplyRiskOutputFlat {
   emission_acceleration_score: number;
   simulation_outcome: SimulationOutcome | null;
   risk_flags: string[];
-  risk_tier: string;
+  final_risk_tier: string;
   result_integrity_hash: string;
   engine_latency_ms: number;
   data_quality_score: number;
@@ -140,16 +137,14 @@ export interface SupplyRiskOutputFlat {
   confidence_score?: number;
   /** Unlock intelligence source: registry > scanner > inferred. */
   unlock_data_source?: "registry" | "external_calendar" | "scanner" | "inferred";
-  /** Supply Shock Fusion Index (0–100) and risk tier. */
-  supply_shock_index?: number;
-  supply_shock_risk_tier?: string;
-  /** Unlock amount / circulating supply (0–1). Supply shock severity layer. */
+  /** Unlock amount / circulating supply (0–1). */
   supply_unlock_percent?: number;
-  /** Supply shock classification: LOW | MODERATE | HIGH | EXTREME. */
-  supply_unlock_classification?: string;
-  /** True when SSI cascade boost was applied (high unlock + high liquidity stress). */
-  cascade_risk_detected?: boolean;
-  /** Explicit no-data signaling for Context compatibility. Always set when risk_tier === "NO_DATA". */
+  /** New risk model outputs. */
+  event_severity_label?: string;
+  absorption_risk_label?: string;
+  timing_urgency_label?: string;
+  composite_score?: number;
+  /** Explicit no-data signaling for Context compatibility. */
   search_exhausted?: boolean;
   records_found?: number;
   no_results_reason?: string;
@@ -206,7 +201,7 @@ export function buildSoftFailureSupplyRisk(
     result_integrity_hash: "",
     historical_depth_limited: true,
     risk_flags: ["NO_DATA"],
-    risk_tier: "LOW",
+    final_risk_tier: "MINOR",
     data_quality_score: 0,
     holder_data_confidence_score: 0,
     combined_volatility_index: 0,
@@ -248,7 +243,7 @@ export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): Suppl
     result_integrity_hash: "",
     historical_depth_limited: true,
     risk_flags: ["NO_DATA"],
-    risk_tier: "LOW",
+    final_risk_tier: "MINOR",
     data_quality_score: 0,
     holder_data_confidence_score: 0,
     combined_volatility_index: 0,
@@ -297,15 +292,15 @@ export function buildStructuredNoDataSupplyRisk(
     no_results_reason === "UNSUPPORTED_CHAIN_OR_NATIVE_ASSET" ||
     no_results_reason === "native_non_evm_asset" ||
     no_results_reason === "UNTRACKED_NATIVE";
-  const riskTier =
-    analysisScope === "insufficient" ? "INSUFFICIENT_DATA" : isNativeUntracked ? "UNTRACKED_NATIVE" : "NO_DATA";
+  const finalTier =
+    analysisScope === "insufficient" ? "MINOR" : isNativeUntracked ? "MINOR" : "MINOR";
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: Math.max(0, Number.isFinite(engine_latency_ms) ? engine_latency_ms : 0),
     result_integrity_hash: "",
     historical_depth_limited: true,
     risk_flags: ["NO_DATA"],
-    risk_tier: riskTier,
+    final_risk_tier: finalTier,
     data_quality_score: 0,
     holder_data_confidence_score: 0,
     combined_volatility_index: 0,
@@ -384,8 +379,13 @@ function buildUnlockOnlySupplyRisk(
   const nextUnlock = unlockData.nextUnlockTimestamp ?? null;
   const hasCliff = eventCount > 0 && nextUnlock != null && nextUnlock > nowSec;
   const pressureRatio = eventCount > 0 ? Math.min(1, 0.2 + eventCount * 0.05) : 0;
-  const classification = getUnlockPressureClassification(pressureRatio);
-  const riskTier = eventCount >= 10 ? "HIGH" : eventCount >= 3 ? "MODERATE" : eventCount >= 1 ? "LOW" : "LOW";
+  const supplyUnlockPct = pressureRatio;
+  const riskModel = computeUnlockRisk({
+    unlock_percent_of_circulating: supplyUnlockPct,
+    unlock_amount: 0,
+    avg_daily_volume: 1,
+    next_unlock_timestamp: nextUnlock,
+  });
   const full: SupplyRiskOutputFlat = {
     ...base,
     engine_latency_ms: 0,
@@ -393,9 +393,12 @@ function buildUnlockOnlySupplyRisk(
     next_estimated_unlock_timestamp: nextUnlock,
     unlock_schedule_status: nextUnlock != null ? "active" : "completed",
     unlock_pressure_ratio: Number(pressureRatio.toFixed(4)),
-    unlock_pressure_classification: classification,
     cliff_detected: hasCliff,
-    risk_tier: riskTier,
+    final_risk_tier: riskModel.final_risk_tier,
+    event_severity_label: riskModel.event_severity_label,
+    absorption_risk_label: riskModel.absorption_risk_label,
+    timing_urgency_label: riskModel.timing_urgency_label,
+    composite_score: riskModel.composite_score,
     risk_flags: eventCount > 0 ? ["UNLOCK_SCHEDULE"] : base.risk_flags,
     analysis_scope: "unlock_only",
     analysis_provenance: {
@@ -897,6 +900,17 @@ function mapRegistryResultToFlat(
     });
   }
   const liquidityStress = Math.min(100, Math.max(0, sanitizeNum(liquidity.liquidity_stress_score)));
+  const circSupply = Math.max(1, context.circulatingSupply);
+  const totalUnlockTokens = context.eventAmounts.reduce((a, b) => a + (b ?? 0), 0);
+  const supplyUnlockPct = circSupply > 0 ? totalUnlockTokens / circSupply : 0;
+  const unlockAmountUsd = totalUnlockTokens * Math.max(0, context.price);
+  const avgDailyVolume = context.volume30dApprox > 0 ? context.volume30dApprox / 30 : 1;
+  const riskModel = computeUnlockRisk({
+    unlock_percent_of_circulating: supplyUnlockPct,
+    unlock_amount: unlockAmountUsd,
+    avg_daily_volume: avgDailyVolume,
+    next_unlock_timestamp: nextTs,
+  });
   const riskFlags = buildRiskFlags({
     liquidity_stress_score: liquidityStress,
     unlock_pressure_ratio: liquidity.unlock_to_volume_ratio,
@@ -915,14 +929,6 @@ function mapRegistryResultToFlat(
     }))
   );
 
-  const ssi = computeSupplyShockFusion({
-    unlock_pressure_ratio: sanitizeNum(liquidity.unlock_to_volume_ratio),
-    liquidity_stress_score: liquidityStress,
-    supply_volatility_index: Math.min(100, Math.max(0, supplyVolatilityIndex)),
-    inflation_rate_30d: sanitizeNum(emission.supply_growth_30d_pct),
-    confidence_score: 100,
-  });
-
   return {
     model_metadata: buildModelMetadata(),
     data_freshness: buildDataFreshness({
@@ -936,7 +942,6 @@ function mapRegistryResultToFlat(
     supply_volatility_index: Math.min(100, Math.max(0, supplyVolatilityIndex)),
     emission_trend: sanitizeNum(emission.supply_velocity),
     unlock_pressure_ratio: sanitizeNum(liquidity.unlock_to_volume_ratio),
-    unlock_pressure_classification: getUnlockPressureClassification(liquidity.unlock_to_volume_ratio),
     fused_volume_30d_usd: sanitizeNum(fused_volume_30d_usd),
     liquidity_stress_score: liquidityStress,
     cliff_detected: Boolean(vesting.has_cliff),
@@ -957,7 +962,12 @@ function mapRegistryResultToFlat(
     emission_acceleration_score: Math.min(100, Math.max(0, emissionAcceleration)),
     simulation_outcome,
     risk_flags: riskFlags,
-    risk_tier: getRiskTier(liquidityStress),
+    final_risk_tier: riskModel.final_risk_tier,
+    event_severity_label: riskModel.event_severity_label,
+    absorption_risk_label: riskModel.absorption_risk_label,
+    timing_urgency_label: riskModel.timing_urgency_label,
+    composite_score: riskModel.composite_score,
+    supply_unlock_percent: supplyUnlockPct,
     result_integrity_hash: "",
     engine_latency_ms: 0,
     data_quality_score: dataQualityScore,
@@ -975,9 +985,7 @@ function mapRegistryResultToFlat(
     unlock_data_source: "registry",
     unlock_provider: "ManualRegistry",
     unlock_provider_confidence: 0.9,
-    supply_shock_index: ssi.supply_shock_index,
-    supply_shock_risk_tier: ssi.supply_shock_risk_tier,
-    cascade_risk_detected: ssi.cascade_risk_detected,
+    unlock_amount_usd: unlockAmountUsd,
     analysis_completion_status: "success",
     data_availability_status: "data_available",
     analysis_timestamp: context.analysisTimestamp,
