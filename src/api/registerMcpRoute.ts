@@ -1222,5 +1222,30 @@ export function registerMcpRoute(
       safeSend(res, jsonRpcError(null, -32603, errorMessage));
     }
   };
+
   app.post("/mcp", ...middleware, handler);
+
+  // Workaround: Context sometimes sends the full URL as the path (e.g. /%2Fhttps:%2F%2F...%2Fmcp).
+  // Accept that path and run the same MCP handler so the tool connects while the dashboard URL is fixed.
+  app.post("*", (req: Request, res: Response, next: () => void): void => {
+    const path = (req.url ?? req.originalUrl ?? "").split("?")[0] ?? "";
+    const pathDecoded = tryDecodeUriPath(path);
+    const isMalformedMcpPath =
+      (pathDecoded.includes("token-unlock-intelligence-mcp") && pathDecoded.includes("/mcp")) ||
+      (path.includes("token-unlock-intelligence-mcp") && path.includes("mcp"));
+    if (isMalformedMcpPath) {
+      logger.warn({ path, pathDecoded }, "Context malformed path workaround: treating as POST /mcp");
+      void handler(req, res);
+      return;
+    }
+    next();
+  });
+}
+
+function tryDecodeUriPath(raw: string): string {
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, " "));
+  } catch {
+    return raw;
+  }
 }
