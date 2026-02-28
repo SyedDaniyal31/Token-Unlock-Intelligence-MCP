@@ -37,6 +37,11 @@ const app = express();
 // Railway runs behind a single reverse proxy.
 // Required for express-rate-limit to correctly read X-Forwarded-For.
 app.set("trust proxy", 1);
+// Diagnostic: log all incoming requests (temporary for MCP route debugging)
+app.use((req, _res, next) => {
+  console.log("Incoming request:", req.method, req.url, "originalUrl:", req.originalUrl);
+  next();
+});
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 app.use(requestIdMiddleware);
@@ -78,6 +83,12 @@ app.get("/mcp", (req: Request, res: Response): void => {
 
 const verifyContextAuth = createContextMiddleware();
 registerMcpRoute(app, deps, [verifyContextAuth]);
+
+// Diagnostic: catch unhandled POST routes (temporary for MCP route debugging)
+app.post("*", (req, res) => {
+  console.error("Unhandled POST route:", req.url, "originalUrl:", req.originalUrl);
+  res.status(404).json({ error: "Route not found", path: req.url, method: "POST" });
+});
 
 app.use(errorHandler);
 
