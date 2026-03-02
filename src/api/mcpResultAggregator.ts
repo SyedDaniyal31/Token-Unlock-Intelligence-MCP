@@ -55,11 +55,13 @@ function normalizeError(err: JsonRpcErrorPayload): { code: number; message: stri
   };
 }
 
+/** @deprecated analyze_token_unlock was removed; use analyze_token_supply_risk only. */
 const UNLOCK_TOOL = "analyze_token_unlock";
 const SUPPLY_RISK_TOOL = "analyze_token_supply_risk";
 
 /**
- * Aggregates unlock and supply-risk MCP responses into one result.
+ * Aggregates MCP tool responses. Prefer single-tool flow: pass (null, supplyRiskResponse).
+ * Unlock data is now part of analyze_token_supply_risk result (unlock_event_assessment, etc.).
  * Preserves JSON-RPC error code and message; never returns error: {}.
  */
 export function aggregateMcpResults(

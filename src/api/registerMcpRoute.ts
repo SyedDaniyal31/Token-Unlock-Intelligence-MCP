@@ -41,50 +41,16 @@ export interface JsonRpcErrorBody {
 }
 
 // ---------------------------------------------------------------------------
-// Tool definitions
+// Tool definitions (single authoritative tool; no overlapping unlock-only tool)
 // ---------------------------------------------------------------------------
 
-const UNLOCK_TOOL_NAME = "analyze_token_unlock";
 const SUPPLY_RISK_TOOL_NAME = "analyze_token_supply_risk";
-
-const UNLOCK_OUTPUT_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    unlock_pressure_ratio: { type: "number" as const },
-    volume_impact_ratio: { type: "number" as const },
-    supply_inflation_percent: { type: "number" as const },
-    risk_score: { type: "number" as const },
-  },
-  required: [
-    "unlock_pressure_ratio",
-    "volume_impact_ratio",
-    "supply_inflation_percent",
-    "risk_score",
-  ] as const,
-};
 
 const MCP_TOOLS = [
   {
-    name: UNLOCK_TOOL_NAME,
-    description:
-      "Token unlock risk analysis for ETH, BSC, Arbitrum, Base. Uses scheduled token release events and market data. Returns supply inflation %, unlock pressure, risk score.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        token_symbol: {
-          type: "string" as const,
-          description: "Token ticker (e.g. MITO, ARB, ETH)",
-          examples: ["ARB", "ETH", "OP", "MITO"],
-        },
-      },
-      required: ["token_symbol"] as const,
-    },
-    outputSchema: UNLOCK_OUTPUT_SCHEMA,
-  },
-  {
     name: SUPPLY_RISK_TOOL_NAME,
     description:
-      "Multi-chain token supply risk engine: historical unlocks, vesting cliffs, emission patterns, liquidity stress for Ethereum, Arbitrum, BSC. For any token on Ethereum, BSC, or Arbitrum, providing token_address (contract address) and chain ensures correct EVM classification and full analysis (onchain, unlock, risk, SSI).",
+      "Comprehensive token unlock and supply risk engine. Includes scheduled unlock analysis, liquidity absorption modeling, and composite risk scoring. Use this tool for TITN-type queries, unlock event assessment, market impact analysis, severity classification, and risk tier. Supports Ethereum, Arbitrum, BSC, Base. Provide token_symbol for registry/calendar analysis, or token_address + chain for full on-chain analysis. This tool supersedes legacy unlock-only endpoints.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -649,37 +615,6 @@ function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody):
 // Keep under typical HTTP/MCP client timeouts (~30s) so we return before Context gives up.
 const TOOL_TIMEOUT_MS = 25_000;
 
-export interface UnlockResultShape {
-  unlock_pressure_ratio: number;
-  volume_impact_ratio: number;
-  supply_inflation_percent: number;
-  risk_score: number;
-}
-
-function isValidUnlockResult(value: unknown): value is UnlockResultShape {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
-  const o = value as Record<string, unknown>;
-  const a = o.unlock_pressure_ratio;
-  const b = o.volume_impact_ratio;
-  const c = o.supply_inflation_percent;
-  const d = o.risk_score;
-  return (
-    typeof a === "number" &&
-    typeof b === "number" &&
-    typeof c === "number" &&
-    typeof d === "number" &&
-    Number.isFinite(a) &&
-    Number.isFinite(b) &&
-    Number.isFinite(c) &&
-    Number.isFinite(d) &&
-    a >= 0 &&
-    b >= 0 &&
-    c >= 0 &&
-    d >= 0 &&
-    d <= 100
-  );
-}
-
 function isValidSupplyRiskResult(value: unknown): value is SupplyRiskOutputFlat {
   if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
   const o = value as Record<string, unknown>;
@@ -838,103 +773,6 @@ function handleListTools(id: string | number | null): JsonRpcSuccess {
   return jsonRpcSuccess(id, { tools: MCP_TOOLS });
 }
 
-function toUnlockResult(report: {
-  unlock_vs_volume_ratio: number;
-  unlock_percent_supply: number;
-  score_numeric: number;
-}): UnlockResultShape {
-  const ratio = Number(report.unlock_vs_volume_ratio) || 0;
-  const pct = Number(report.unlock_percent_supply) || 0;
-  const risk = Number(report.score_numeric) ?? 0;
-  return {
-    unlock_pressure_ratio: ratio,
-    volume_impact_ratio: ratio,
-    supply_inflation_percent: pct,
-    risk_score: Math.round(Math.min(100, Math.max(0, risk))),
-  };
-}
-
-/** Map supply risk flat to unlock report shape for dynamic-path fallback. */
-function supplyRiskToUnlockReport(data: SupplyRiskOutputFlat): {
-  unlock_vs_volume_ratio: number;
-  unlock_percent_supply: number;
-  score_numeric: number;
-} {
-  return {
-    unlock_vs_volume_ratio: typeof data.unlock_pressure_ratio === "number" ? data.unlock_pressure_ratio : 0,
-    unlock_percent_supply: typeof data.inflation_rate_30d === "number" ? data.inflation_rate_30d : 0,
-    score_numeric: typeof data.liquidity_stress_score === "number" ? data.liquidity_stress_score : 0,
-  };
-}
-
-/**
- * Unified flow: 1) Scheduled unlock data 2) CoinGecko for price/chain 3) Risk analysis.
- * Supports ETH, BSC, ARB, Base. Uses scheduled release events; supports non-EVM when unlock data is available.
- */
-async function handleAnalyzeTokenUnlock(
-  id: string | number | null,
-  symbol: string,
-  deps: UnlockIntelligenceDeps
-): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
-  const symbolNorm = (symbol ?? "").trim().toUpperCase().replace(/^\$/, "");
-  if (!symbolNorm) {
-    return jsonRpcError(id, -32602, "token_symbol is required.");
-  }
-
-  try {
-    // Single path: runAnalyzeTokenSupplyRisk uses scheduled unlock data, CoinGecko, then full analysis
-    const supplyResult = await Promise.race([
-      runAnalyzeTokenSupplyRisk({ token_symbol: symbolNorm }, deps),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Analysis timed out")), TOOL_TIMEOUT_MS)
-      ),
-    ]);
-
-    if (!supplyResult?.success || !supplyResult.data) {
-      return jsonRpcSuccess(id, {
-        supported: false,
-        classification: "NO_SCHEDULED_DATA",
-        message: "No unlock data found for this token.",
-        unlock_pressure_ratio: 0,
-        volume_impact_ratio: 0,
-        supply_inflation_percent: 0,
-        risk_score: 0,
-      });
-    }
-
-    const data = supplyResult.data as SupplyRiskOutputFlat & { status?: string; analysis_scope?: string };
-    if (data.status === "unsupported_chain" && data.analysis_scope !== "scheduled_unlock") {
-      const unsupported = data as { message?: string; detected_chain?: string };
-      return jsonRpcSuccess(id, {
-        supported: false,
-        classification: "UNSUPPORTED_CHAIN",
-        message: unsupported.message ?? `Token runs on ${unsupported.detected_chain ?? "unsupported chain"}. Supported: ethereum, bsc, arbitrum, base.`,
-        unlock_pressure_ratio: 0,
-        volume_impact_ratio: 0,
-        supply_inflation_percent: 0,
-        risk_score: 0,
-      });
-    }
-
-    const report = supplyRiskToUnlockReport(data);
-    const result = toUnlockResult(report);
-    if (!isValidUnlockResult(result)) {
-      return jsonRpcError(id, -32603, "Internal result validation failed.");
-    }
-    logger.info({ tool: UNLOCK_TOOL_NAME, token_symbol: symbolNorm, risk_score: result.risk_score }, "MCP callTool success");
-    return jsonRpcSuccess(id, result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message, token_symbol: symbolNorm }, "MCP analyze_token_unlock error");
-    const isTimeout = message.includes("timed out");
-    return jsonRpcError(
-      id,
-      isTimeout ? -32001 : -32000,
-      isTimeout ? "Analysis timed out. Try again or use a different token." : `Unlock analysis failed: ${message}.`
-    );
-  }
-}
-
 async function handleAnalyzeTokenSupplyRisk(
   id: string | number | null,
   token: string,
@@ -1055,16 +893,6 @@ async function handleCallTool(
     ? (args as { token_address: string }).token_address.trim()
     : "";
 
-  if (name === UNLOCK_TOOL_NAME) {
-    if (typeof tokenSymbol !== "string" && tokenSymbol != null) {
-      return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
-    }
-    if (!token) {
-      logger.warn({ tool: name }, "MCP missing required argument: token_symbol");
-      return jsonRpcError(id, -32602, "Missing required argument: token_symbol. Provide a token ticker (e.g. ARB, ETH).");
-    }
-    return handleAnalyzeTokenUnlock(id, token, deps);
-  }
   if (name === SUPPLY_RISK_TOOL_NAME) {
     if (tokenSymbol != null && typeof tokenSymbol !== "string") {
       return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
@@ -1077,7 +905,7 @@ async function handleCallTool(
   }
 
   logger.warn({ name }, "MCP unknown tool");
-  return jsonRpcError(id, -32602, `Unknown tool: ${name || "(missing)"}. Supported: ${UNLOCK_TOOL_NAME}, ${SUPPLY_RISK_TOOL_NAME}.`);
+  return jsonRpcError(id, -32602, `Unknown tool: ${name || "(missing)"}. Use ${SUPPLY_RISK_TOOL_NAME} for token unlock and supply risk analysis.`);
 }
 
 function handleInitialize(id: string | number | null): JsonRpcSuccess {
