@@ -1307,7 +1307,7 @@ export function registerMcpRoute(
       } catch {
         /* ignore */
       }
-      void handler(req, res, () => {}).catch((err) => {
+      void Promise.resolve(handler(req, res, () => {})).catch((err: unknown) => {
         console.error("Unhandled MCP error (malformed path workaround):", err);
       });
       return;
