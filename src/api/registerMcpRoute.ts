@@ -1142,11 +1142,30 @@ export function registerMcpRoute(
   registerSseEndpoint(app);
   const handler: RequestHandler = async (req: Request, res: Response): Promise<void> => {
     const requestId = req.body != null && typeof req.body === "object" && "id" in req.body ? (req.body as { id: unknown }).id ?? null : null;
+    const errId = typeof requestId === "number" || typeof requestId === "string" ? requestId : null;
 
     const sendJsonRpc = (payload: JsonRpcSuccess | JsonRpcErrorBody): void => {
       if (res.headersSent) return;
-      console.log("MCP POST responding");
-      res.status(200).set("Content-Type", "application/json").json(payload);
+      try {
+        console.log("MCP POST responding");
+        res.status(200).set("Content-Type", "application/json").json(payload);
+      } catch (sendErr) {
+        console.error("Unhandled MCP error: send failed", sendErr);
+      }
+    };
+
+    const sendStructuredFailure = (error: string, error_code: string): void => {
+      if (res.headersSent) return;
+      try {
+        console.log("MCP POST responding (error)");
+        res.status(200).set("Content-Type", "application/json").json({
+          jsonrpc: "2.0",
+          id: errId,
+          result: { success: false, error, error_code },
+        });
+      } catch (sendErr) {
+        console.error("Unhandled MCP error: send failed", sendErr);
+      }
     };
 
     try {
@@ -1160,7 +1179,7 @@ export function registerMcpRoute(
         return;
       }
       if (body.jsonrpc !== "2.0") {
-        sendJsonRpc(jsonRpcError(null, -32600, "Invalid JSON-RPC request"));
+        sendJsonRpc(jsonRpcError(errId, -32600, "Invalid JSON-RPC request"));
         return;
       }
 
@@ -1189,19 +1208,33 @@ export function registerMcpRoute(
         return;
       }
 
-      // All other methods: call handler then send (may be async)
+      // All other methods: call handler then send (may be async). Never let handler throw.
       let response: JsonRpcSuccess | JsonRpcErrorBody;
-
-      if (methodName === "callTool" || methodName === "tools/call") {
-        response = await handleCallTool(id, body.params, deps);
-      } else if (methodName === "analyze_token_supply_risk") {
-        const args = parseArguments(body.params);
-        const tokenSymbol = args.token_symbol ?? args.tokenSymbol ?? args.token;
-        const token = (typeof tokenSymbol === "string" ? tokenSymbol : tokenSymbol != null ? String(tokenSymbol) : "").trim();
-        response = await handleAnalyzeTokenSupplyRisk(id, token, args, deps);
-      } else {
-        logger.warn({ method: methodName }, "MCP method not found");
-        response = jsonRpcError(id, -32601, `Method not found: ${methodName}.`);
+      try {
+        if (methodName === "callTool" || methodName === "tools/call") {
+          response = await handleCallTool(id, body.params, deps);
+        } else if (methodName === "analyze_token_supply_risk") {
+          const args = parseArguments(body.params);
+          const tokenSymbol = args.token_symbol ?? args.tokenSymbol ?? args.token;
+          const token = (typeof tokenSymbol === "string" ? tokenSymbol : tokenSymbol != null ? String(tokenSymbol) : "").trim();
+          response = await handleAnalyzeTokenSupplyRisk(id, token, args, deps);
+        } else {
+          try {
+            logger.warn({ method: methodName }, "MCP method not found");
+          } catch {
+            /* ignore logger throw */
+          }
+          response = jsonRpcError(id, -32601, `Method not found: ${methodName}.`);
+        }
+      } catch (toolErr) {
+        const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+        console.error("Unhandled MCP error:", toolErr);
+        const isDb = /database|query|connection|ECONNREFUSED|timeout/i.test(msg);
+        sendStructuredFailure(
+          isDb ? "Database query failed" : "Internal server error",
+          isDb ? "DB_QUERY_ERROR" : "INTERNAL_ERROR"
+        );
+        return;
       }
 
       if (!response || typeof response !== "object" || !("jsonrpc" in response)) {
@@ -1221,7 +1254,11 @@ export function registerMcpRoute(
           );
         }
       }
-      response = ensureFlatResultPayload(response, id);
+      try {
+        response = ensureFlatResultPayload(response, id);
+      } catch {
+        response = jsonRpcSuccess(id, buildSoftFailureSupplyRisk("INVALID_RESULT_SHAPE", 0));
+      }
       if (
         (methodName === "callTool" || methodName === "tools/call") &&
         "result" in response &&
@@ -1229,26 +1266,27 @@ export function registerMcpRoute(
         typeof (response as JsonRpcSuccess).result === "object" &&
         !Array.isArray((response as JsonRpcSuccess).result)
       ) {
-        response = addToolsCallContentCompat(response);
+        try {
+          response = addToolsCallContentCompat(response);
+        } catch {
+          /* keep response as-is */
+        }
       }
       if ("result" in response) {
         if (Array.isArray((response as JsonRpcSuccess).result) || (response as JsonRpcSuccess).result == null) {
           response = jsonRpcSuccess(id, buildSoftFailureSupplyRisk("FINAL_GUARD_ARRAY_BLOCKED", 0));
         }
       }
-      logger.info({ id, method: methodName, hasResult: "result" in response }, "MCP POST result ready");
+      try {
+        logger.info({ id, method: methodName, hasResult: "result" in response }, "MCP POST result ready");
+      } catch {
+        /* ignore logger throw */
+      }
       sendJsonRpc(response);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ err, message }, "MCP POST unhandled error");
+      console.error("Unhandled MCP error:", err);
       if (!res.headersSent) {
-        console.log("MCP POST responding (error)");
-        const errId = typeof requestId === "number" || typeof requestId === "string" ? requestId : null;
-        res.status(200).set("Content-Type", "application/json").json({
-          jsonrpc: "2.0",
-          id: errId,
-          error: { code: -32603, message: "Internal server error" },
-        });
+        sendStructuredFailure("Internal server error", "INTERNAL_ERROR");
       }
     }
   };
@@ -1264,8 +1302,14 @@ export function registerMcpRoute(
       (pathDecoded.includes("token-unlock-intelligence-mcp") && pathDecoded.includes("/mcp")) ||
       (path.includes("token-unlock-intelligence-mcp") && path.includes("mcp"));
     if (isMalformedMcpPath) {
-      logger.warn({ path, pathDecoded }, "Context malformed path workaround: treating as POST /mcp");
-      void handler(req, res, () => {});
+      try {
+        logger.warn({ path, pathDecoded }, "Context malformed path workaround: treating as POST /mcp");
+      } catch {
+        /* ignore */
+      }
+      void handler(req, res, () => {}).catch((err) => {
+        console.error("Unhandled MCP error (malformed path workaround):", err);
+      });
       return;
     }
     next();
