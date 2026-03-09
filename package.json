@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "railway:deploy": "npm run build && node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "test:unlock-coverage": "npm run build && node dist/scripts/testUnlockCoverage.js",
     "import-registry": "node dist/scripts/importManualRegistry.js",
     "import-registry:file": "node dist/scripts/importManualRegistry.js src/scripts/manual_registry.csv",
     "import:registry:cmc": "node dist/scripts/importManualRegistryCmcFormat.js",

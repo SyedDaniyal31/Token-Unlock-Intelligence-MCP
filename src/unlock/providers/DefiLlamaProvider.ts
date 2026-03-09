@@ -26,6 +26,12 @@ const SLUG_OVERRIDES: Record<string, string> = {
   APTOS: "aptos",
   ENA: "ethena",
   ETHENA: "ethena",
+  TIA: "celestia",
+  CELESTIA: "celestia",
+  STRK: "starknet",
+  STARKNET: "starknet",
+  SUI: "sui",
+  HYPE: "hype",
 };
 
 interface MemoEntry {

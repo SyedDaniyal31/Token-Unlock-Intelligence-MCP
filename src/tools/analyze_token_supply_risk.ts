@@ -52,6 +52,7 @@ import {
 } from "../services/dynamicSupply/supplyRiskResultCache.js";
 import { resolveAsset } from "../core/assetResolver.js";
 import { fetchUnlockData } from "../core/dataFetchLayer.js";
+import { parseVestingFromEvents } from "../unlock/vestingScheduleParser.js";
 import logger from "../core/logger.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
@@ -159,7 +160,22 @@ export interface SupplyRiskOutputFlat {
   analysis_timestamp: string;
   engine_version: string;
   data_freshness_seconds: number;
+  /** User-facing message when no unlock data (e.g. after exhausting all sources). */
+  message?: string;
+  /** Parsed vesting schedule (token, total_supply, circulating_supply, next_unlock_*, unlock_category). */
+  vesting_schedule?: import("../unlock/vestingScheduleParser.js").VestingScheduleOutput;
 }
+
+/** No-data reason when all unlock sources (TokenUnlocks, DefiLlama, Messari, etc.) were tried and none had data. */
+export const UNLOCK_UNAVAILABLE_ACROSS_SOURCES = "Unlock data unavailable across all sources";
+
+/** User-facing message when no verified unlock schedule is found. */
+export const USER_MESSAGE_NO_VERIFIED_UNLOCK =
+  "No verified unlock schedule found across TokenUnlocks, DefiLlama, or Messari sources.";
+
+/** When DocsProvider (and all APIs) fail to derive a schedule from docs. */
+export const DOCS_DERIVE_FAILURE_REASON =
+  "Unlock schedule could not be derived from APIs or documentation";
 
 /** Structured response when chain is not supported (ethereum, bsc, arbitrum, base only). */
 export interface UnsupportedChainData {
@@ -276,9 +292,20 @@ export function buildCompletedNoDataSupplyRisk(engine_latency_ms: number): Suppl
   return full;
 }
 
+/** Reasons that indicate no unlock schedule was found (use user-facing message). */
+const UNLOCK_EXHAUSTED_REASONS = new Set([
+  UNLOCK_UNAVAILABLE_ACROSS_SOURCES,
+  DOCS_DERIVE_FAILURE_REASON,
+  "NO_SCHEDULED_DATA",
+  "DYNAMIC_ENGINE_NO_DATA",
+  "no_matching_data",
+  "NO_UNLOCK_EVENTS_OR_MARKET_DATA",
+]);
+
 /**
  * Structured no-data response for Context compatibility. Use when zero data is legitimate
  * (registry/dynamic checked, no unlock events or market data). Never return [] or {}.
+ * When no_results_reason indicates unlock exhaustion, sets message to USER_MESSAGE_NO_VERIFIED_UNLOCK.
  */
 export function buildStructuredNoDataSupplyRisk(
   token_symbol: string,
@@ -333,6 +360,12 @@ export function buildStructuredNoDataSupplyRisk(
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: Math.max(0, Number.isFinite(dataFreshnessSeconds) ? dataFreshnessSeconds : 0),
   };
+  if (UNLOCK_EXHAUSTED_REASONS.has(no_results_reason)) {
+    full.message =
+      no_results_reason === DOCS_DERIVE_FAILURE_REASON
+        ? DOCS_DERIVE_FAILURE_REASON
+        : USER_MESSAGE_NO_VERIFIED_UNLOCK;
+  }
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   return full;
 }
@@ -372,6 +405,7 @@ function buildUnlockOnlySupplyRisk(
     nextUnlockTimestamp?: number | null;
     nextUnlockUnlockPercent?: number | null;
     unlockEvents?: { unlock_timestamp: number; unlock_percent?: number }[] | null;
+    unlock_events_full?: import("../unlock/providers/UnlockProvider.js").NormalizedUnlockEvent[];
     source?: string;
     unlock_provider?: string;
     unlock_provider_confidence?: number;
@@ -430,6 +464,18 @@ function buildUnlockOnlySupplyRisk(
     engine_version: ENGINE_VERSION,
     data_freshness_seconds: 0,
   };
+  if (unlockData.unlock_events_full && unlockData.unlock_events_full.length > 0) {
+    try {
+      full.vesting_schedule = parseVestingFromEvents(
+        unlockData.unlock_events_full,
+        0,
+        0,
+        token_symbol
+      );
+    } catch {
+      /* fallback to event-level response */
+    }
+  }
   full.result_integrity_hash = computeResultIntegrityHash(full as unknown as Record<string, unknown>) || "";
   return full;
 }
@@ -537,7 +583,10 @@ export async function runAnalyzeTokenSupplyRisk(
         data: buildUnlockOnlySupplyRisk(asset.symbol, unlockData, analysisTimestamp),
       };
     }
-    const noDataReason = asset.unresolved === true ? "NO_SCHEDULED_DATA" : "UNTRACKED_NATIVE";
+    // Use docs failure reason when DocsProvider was last and returned it; else generic.
+    const noDataReason =
+      (unlockData as { unlock_fetch_error?: string }).unlock_fetch_error ??
+      UNLOCK_UNAVAILABLE_ACROSS_SOURCES;
     return {
       success: true,
       data: buildStructuredNoDataSupplyRisk(
@@ -640,10 +689,16 @@ export async function runAnalyzeTokenSupplyRisk(
       }
       // Engine returned no-data (e.g. INVALID_SUPPLY or NO_DATA) — return structured NO_DATA
       if (result.no_results_reason != null && result.no_results_reason !== "") {
+        const reason =
+          result.no_results_reason === DOCS_DERIVE_FAILURE_REASON
+            ? DOCS_DERIVE_FAILURE_REASON
+            : result.analysis_provenance?.unlock_data_available === false
+              ? UNLOCK_UNAVAILABLE_ACROSS_SOURCES
+              : result.no_results_reason;
         const noData = buildStructuredNoDataSupplyRisk(
           symbol || tokenAddress || "unknown",
           "dynamic",
-          result.no_results_reason,
+          reason,
           engine_latency_ms,
           analysisTimestamp,
           0
@@ -651,10 +706,14 @@ export async function runAnalyzeTokenSupplyRisk(
         return { success: true, data: noData };
       }
       if (Array.isArray(full.risk_flags) && full.risk_flags.includes("NO_DATA")) {
+        const reason =
+          full.analysis_provenance?.unlock_data_available === false
+            ? UNLOCK_UNAVAILABLE_ACROSS_SOURCES
+            : (full.no_results_reason ?? "DYNAMIC_ENGINE_NO_DATA");
         const noData = buildStructuredNoDataSupplyRisk(
           symbol || tokenAddress || "unknown",
           "dynamic",
-          full.no_results_reason ?? "DYNAMIC_ENGINE_NO_DATA",
+          reason,
           engine_latency_ms,
           analysisTimestamp,
           0

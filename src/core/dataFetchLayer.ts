@@ -7,6 +7,7 @@ import type { AssetMetadata } from "./assetResolver.js";
 import { getRpcUrl, readErc20SupplyFromRpc } from "../services/unlockScanner/chainClient.js";
 import { getSupplyFromCacheWithTimestamp, setSupplyInCache } from "../services/dynamicSupply/supplyCache.js";
 import { resolveUnlockData } from "../unlock/unlockProviderEngine.js";
+import type { NormalizedUnlockEvent } from "../unlock/providers/UnlockProvider.js";
 
 export interface OnchainFetchResult {
   success: boolean;
@@ -25,10 +26,14 @@ export interface UnlockFetchResult {
   nextUnlockTimestamp?: number | null;
   /** Unlock % of total supply from manual registry (e.g. 30.2). Do not recalculate; use for display. */
   nextUnlockUnlockPercent?: number | null;
-  /** Raw provider name (e.g. ManualRegistry, DefiLlama). */
+  /** Raw provider name (e.g. ManualRegistry, DefiLlama, DocsProvider). */
   unlock_provider?: string;
   /** Provider confidence 0–1. */
   unlock_provider_confidence?: number;
+  /** When success is false, optional reason (e.g. docs parse failure). */
+  unlock_fetch_error?: string;
+  /** Full events from provider (for vesting schedule parser). Set when success and events exist. */
+  unlock_events_full?: NormalizedUnlockEvent[];
 }
 
 /**
@@ -85,8 +90,11 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
     const result = await resolveUnlockData(asset);
     const sourceMap: Record<string, "registry" | "external_calendar" | "scanner" | "inferred"> = {
       ManualRegistry: "registry",
-      Mobula: "external_calendar",
+      TokenUnlocks: "external_calendar",
       DefiLlama: "external_calendar",
+      Messari: "external_calendar",
+      Mobula: "external_calendar",
+      DocsProvider: "external_calendar",
     };
     const source = result.source === "none" ? "inferred" : (sourceMap[result.source] ?? "inferred");
     const events = result.events;
@@ -105,6 +113,8 @@ export async function fetchUnlockData(asset: AssetMetadata): Promise<UnlockFetch
       nextUnlockUnlockPercent,
       unlock_provider: result.source === "none" ? undefined : result.source,
       unlock_provider_confidence: result.confidence_score ?? 0,
+      unlock_fetch_error: result.success ? undefined : (result as { error?: string }).error,
+      unlock_events_full: result.success && events.length > 0 ? events : undefined,
     };
   } catch {
     return { success: false };

@@ -27,6 +27,7 @@ import { getMemoizedResult, setMemoizedResult } from "./intelligenceMemo.js";
 import { resolveAsset, type AssetMetadata } from "../../core/assetResolver.js";
 import { isChainSupported, SUPPORTED_CHAINS } from "../../core/chainCapabilities.js";
 import { resolveUnlockData } from "../../unlock/unlockProviderEngine.js";
+import { parseVestingFromEvents } from "../../unlock/vestingScheduleParser.js";
 import { getRpcUrl, getCurrentBlock, getBlockTimestamp, readErc20SupplyFromRpc } from "../unlockScanner/chainClient.js";
 import { getMarketEnrichment, type MarketEnrichment } from "../marketData/marketEnrichment.js";
 import { inferSupplyShockUnlock, shouldApplySupplyShockInference } from "../../intelligence/supplyShockInference.js";
@@ -143,6 +144,8 @@ export interface DynamicSupplyOutput {
   inferred_distribution_pressure?: number;
   /** Set when engine returns early (e.g. INVALID_SUPPLY) for structured no-data. */
   no_results_reason?: string;
+  /** Parsed vesting schedule when unlock events exist (token, total_supply, next_unlock_*, unlock_category). */
+  vesting_schedule?: import("../../unlock/vestingScheduleParser.js").VestingScheduleOutput;
 }
 
 function toNum(x: unknown): number {
@@ -793,6 +796,20 @@ export async function runDynamicSupplyEngine(
     out.registry_unlock_percent = registryUnlockPercent;
   }
 
+  if (unlock_data_available && unlockData.events.length > 0) {
+    try {
+      const circ = enrichment?.circulatingSupply;
+      out.vesting_schedule = parseVestingFromEvents(
+        unlockData.events,
+        totalSupply,
+        circ != null && Number.isFinite(circ) ? circ : totalSupply,
+        asset.symbol
+      );
+    } catch {
+      /* fallback to event-level response */
+    }
+  }
+
   // Apply new risk model (severity, absorption, timing → composite → final_risk_tier)
   const avgDailyVolume = out.fused_volume_30d_usd > 0 ? out.fused_volume_30d_usd / 30 : 1;
   const riskModel = computeUnlockRisk({
@@ -810,6 +827,15 @@ export async function runDynamicSupplyEngine(
   // When scheduled unlock exists, inferred fields must not appear (mutual exclusivity).
   if (out.analysis_provenance.unlock_data_available && out.inferred_distribution_pressure != null) {
     delete out.inferred_distribution_pressure;
+  }
+
+  // Pass through docs parse failure so tool can return structured message.
+  if (
+    !unlock_data_available &&
+    unlockData.source === "DocsProvider" &&
+    (unlockData as { error?: string }).error
+  ) {
+    out.no_results_reason = (unlockData as { error?: string }).error;
   }
 
   logger.info({ ms: Date.now() - t0 }, "STAGE_ENGINE_TOTAL");
@@ -921,6 +947,13 @@ function buildCalendarOnlyOutput(
     block_timestamp_used: 0,
     nowSec,
   });
+  if (events.length > 0) {
+    try {
+      out.vesting_schedule = parseVestingFromEvents(events, 0, 0, asset.symbol);
+    } catch {
+      /* fallback to event-level response */
+    }
+  }
   return out;
 }
 

@@ -186,7 +186,11 @@ const MCP_TOOLS = [
         },
         no_results_reason: {
           type: "string" as const,
-          description: "Machine-readable reason when no data was found (e.g. no_matching_data). Indicates completed analysis, not infrastructure failure.",
+          description: "Machine-readable reason when no data was found (e.g. Unlock data unavailable across all sources). Indicates completed analysis, not infrastructure failure.",
+        },
+        message: {
+          type: "string" as const,
+          description: "User-facing message when no verified unlock schedule found (e.g. across TokenUnlocks, DefiLlama, or Messari).",
         },
         analysis_completion_status: {
           type: "string" as const,
@@ -266,6 +270,19 @@ const MCP_TOOLS = [
         assessment_report: {
           type: "string" as const,
           description: "Formatted institutional report: Unlock Event Assessment + Market Impact Analysis.",
+        },
+        vesting_schedule: {
+          type: "object" as const,
+          description: "Parsed vesting schedule when unlock events exist (token, total_supply, circulating_supply, next_unlock_date, next_unlock_amount, unlock_percent_of_circulating, unlock_category).",
+          properties: {
+            token: { type: "string" as const },
+            total_supply: { type: "number" as const },
+            circulating_supply: { type: "number" as const },
+            next_unlock_date: { type: ["string", "null"] as const },
+            next_unlock_amount: { type: "number" as const },
+            unlock_percent_of_circulating: { type: "number" as const },
+            unlock_category: { type: "string" as const, enum: ["team", "investor", "ecosystem", "foundation", "unknown"] as const },
+          },
         },
       },
       required: [
@@ -549,6 +566,10 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
   out.final_risk_tier = riskLabels.final_risk_tier;
   out.analysis_timestamp = obj.analysis_timestamp;
   out.engine_version = obj.engine_version;
+
+  if (obj.vesting_schedule != null && typeof obj.vesting_schedule === "object" && !Array.isArray(obj.vesting_schedule)) {
+    out.vesting_schedule = obj.vesting_schedule;
+  }
 
   return out;
 }

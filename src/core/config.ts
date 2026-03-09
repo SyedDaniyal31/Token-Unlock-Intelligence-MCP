@@ -44,4 +44,14 @@ export const config = {
     const v = getEnv("MOBULA_API_KEY");
     return v && String(v).trim() ? String(v).trim() : null;
   },
+  /** TokenUnlocks / Tokenomist API key for unlock calendar. Optional; improves coverage for ENA, HYPE, etc. */
+  get TOKENUNLOCKS_API_KEY(): string | null {
+    const v = getEnv("TOKENUNLOCKS_API_KEY");
+    return v && String(v).trim() ? String(v).trim() : null;
+  },
+  /** Messari API key for token unlocks/vesting. Optional; improves coverage. */
+  get MESSARI_API_KEY(): string | null {
+    const v = getEnv("MESSARI_API_KEY");
+    return v && String(v).trim() ? String(v).trim() : null;
+  },
 } as const;
