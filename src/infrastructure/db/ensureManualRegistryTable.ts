@@ -79,3 +79,23 @@ export async function ensureManualRegistryTableChecked(): Promise<void> {
     logger.warn({ err: err instanceof Error ? err.message : String(err), table: TABLE_NAME }, "MANUAL_REGISTRY_TABLE_CHECK_FAILED");
   }
 }
+
+const STARTUP_VALIDATION_SYMBOLS = ["SEI", "ENA", "HYPE", "ARB", "OP", "SUI"];
+
+/**
+ * Log unlock_events_external row counts for key symbols (startup validation).
+ */
+export async function logRegistrySymbolCounts(): Promise<void> {
+  try {
+    for (const symbol of STARTUP_VALIDATION_SYMBOLS) {
+      const r = await query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM unlock_events_external WHERE UPPER(TRIM(token_symbol)) = $1`,
+        [symbol]
+      );
+      const count = r?.rows?.[0]?.count ?? "0";
+      logger.info({ symbol, registryEventCount: Number(count) }, "REGISTRY_STARTUP_VALIDATION");
+    }
+  } catch (err) {
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "REGISTRY_STARTUP_VALIDATION_FAILED");
+  }
+}

@@ -3,7 +3,7 @@ import * as path from "path";
 import { config } from "./core/config.js";
 import { start, shutdown } from "./app.js";
 import { runMigrations } from "./infrastructure/db/runMigrations.js";
-import { ensureManualRegistryTableChecked } from "./infrastructure/db/ensureManualRegistryTable.js";
+import { ensureManualRegistryTableChecked, logRegistrySymbolCounts } from "./infrastructure/db/ensureManualRegistryTable.js";
 import { syncUnlockRegistryToDb } from "./ingestion/index.js";
 import { importManualRegistryFromCmcCsv } from "./scripts/importManualRegistryCmcFormat.js";
 import { getConfiguredChains } from "./infrastructure/rpc/chainProviderFactory.js";
@@ -68,8 +68,9 @@ async function bootstrap(): Promise<void> {
   // Run manual registry import in background so server is up immediately; import failures don't block startup
   const csvPath = path.join(__dirname, "scripts", "manual_registry.csv");
   importManualRegistryFromCmcCsv(csvPath)
-    .then((rows) => {
+    .then(async (rows) => {
       if (rows > 0) logger.info({ rows }, "Manual registry CMC CSV imported");
+      await logRegistrySymbolCounts();
     })
     .catch((err) => logger.warn({ err }, "Manual registry CMC import failed; continuing."));
 }

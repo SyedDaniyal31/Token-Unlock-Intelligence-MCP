@@ -6,7 +6,7 @@
 CREATE TABLE IF NOT EXISTS unlock_events_external (
   token_symbol     TEXT NOT NULL,
   unlock_timestamp BIGINT NOT NULL,
-  unlock_amount    NUMERIC NOT NULL,
+  unlock_amount    NUMERIC NULL,
   unlock_percent   NUMERIC NULL,
   source           TEXT NOT NULL,
   created_at       TIMESTAMP NOT NULL DEFAULT NOW()

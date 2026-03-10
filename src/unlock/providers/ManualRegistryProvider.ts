@@ -1,5 +1,6 @@
 /**
  * Manual registry provider: reads from unlock_events_external (DB).
+ * Registry is the authoritative first source; external APIs are fallback only.
  * Chain-agnostic; supports manual overrides and ingested calendar data.
  */
 
@@ -7,6 +8,7 @@ import type { AssetMetadata } from "../../core/assetResolver.js";
 import { query } from "../../infrastructure/database/postgres.js";
 import type { NormalizedUnlockEvent, UnlockFetchResult } from "./UnlockProvider.js";
 import type { UnlockProvider } from "./UnlockProvider.js";
+import logger from "../../core/logger.js";
 
 export const manualRegistryProvider: UnlockProvider = {
   name: "ManualRegistry",
@@ -17,10 +19,7 @@ export const manualRegistryProvider: UnlockProvider = {
 
   async fetchUnlocks(asset: AssetMetadata): Promise<UnlockFetchResult> {
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
       const symbol = asset.symbol.toUpperCase().trim();
-      // Include past 90 days + future so schedule data is available even when next unlock is in the past.
-      const minTimestamp = nowSec - 90 * 24 * 60 * 60;
       const result = await query<{
         token_symbol: string;
         unlock_timestamp: string | number;
@@ -31,10 +30,9 @@ export const manualRegistryProvider: UnlockProvider = {
         `SELECT token_symbol, unlock_timestamp, unlock_amount, unlock_percent, source
          FROM unlock_events_external
          WHERE UPPER(TRIM(token_symbol)) = UPPER(TRIM($1))
-           AND unlock_timestamp > $2
          ORDER BY unlock_timestamp ASC
          LIMIT 500`,
-        [symbol, minTimestamp]
+        [symbol]
       );
 
       const rows = result?.rows ?? [];
@@ -46,8 +44,13 @@ export const manualRegistryProvider: UnlockProvider = {
         source: string;
       }) => {
         const ts = typeof r.unlock_timestamp === "number" ? r.unlock_timestamp : Number(r.unlock_timestamp);
+        const nowSec = Math.floor(Date.now() / 1000);
         const unlock_timestamp = Number.isFinite(ts) ? Math.floor(ts) : nowSec;
-        const unlock_amount = typeof r.unlock_amount === "number" ? r.unlock_amount : Number(r.unlock_amount) || 0;
+        const rawAmount = r.unlock_amount;
+        const unlock_amount =
+          rawAmount != null && rawAmount !== ""
+            ? (typeof rawAmount === "number" ? rawAmount : Number(rawAmount))
+            : 0;
         const unlock_percent =
           r.unlock_percent != null
             ? typeof r.unlock_percent === "number"
@@ -57,11 +60,16 @@ export const manualRegistryProvider: UnlockProvider = {
         return {
           token_symbol: (r.token_symbol ?? symbol).toString().toUpperCase(),
           unlock_timestamp,
-          unlock_amount: Math.max(0, unlock_amount),
+          unlock_amount: Number.isFinite(unlock_amount) ? Math.max(0, unlock_amount) : 0,
           unlock_percent: unlock_percent != null && Number.isFinite(unlock_percent) ? unlock_percent : undefined,
           source: (r.source ?? "ManualRegistry").toString(),
         };
       });
+
+      logger.info(
+        { token_symbol: symbol, registryEventsFound: events.length },
+        "MANUAL_REGISTRY_QUERY_RESULT"
+      );
 
       return {
         success: events.length > 0,

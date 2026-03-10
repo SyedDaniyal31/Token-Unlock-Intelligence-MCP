@@ -22,7 +22,7 @@ const DEFAULT_CSV = "src/scripts/manual_registry.csv";
 interface ParsedRow {
   token_symbol: string;
   unlock_timestamp: number;
-  unlock_amount: number;
+  unlock_amount: number | null;
   unlock_percent: number | null;
   source: string;
 }
@@ -48,8 +48,29 @@ function toNum(x: unknown): number | null {
 }
 
 /**
+ * Normalize amount strings: 10M → 10000000, 2B → 2000000000, 5K → 5000.
+ * Do not drop rows when amount is missing; caller will set unlock_amount = null.
+ * Values ending in % are treated as non-numeric for amount (return null).
+ */
+function normalizeAmount(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const v = String(value).trim().toUpperCase().replace(/,/g, "");
+  if (!v) return null;
+  if (v.endsWith("%")) return null;
+  const numPart = v.replace(/[KMB]/g, "").trim();
+  const parsed = numPart ? parseFloat(numPart) : NaN;
+  if (!Number.isFinite(parsed)) return null;
+  if (v.endsWith("B")) return parsed * 1e9;
+  if (v.endsWith("M")) return parsed * 1e6;
+  if (v.endsWith("K")) return parsed * 1e3;
+  return parsed;
+}
+
+/**
  * Parse CMC-style CSV: project_name, token_symbol, circulating_supply, unlock_amount, unlock_percent, unlock_date
  * Column indices: 0=project, 1=token_symbol, 2=circulating_supply, 3=unlock_amount, 4=unlock_percent, 5=date
+ * Amount supports 10M, 2B, 5K. Do not drop rows when amount missing (set unlock_amount = null).
+ * Historical unlocks (unlock_timestamp < now) are kept; only invalid timestamp rows are skipped.
  */
 function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
   const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -61,7 +82,10 @@ function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
   for (let i = 1; i < lines.length; i++) {
     const parts = lines[i].split(",").map((p) => p.trim().replace(/^"|"$/g, ""));
     const token_symbol = (parts[1] ?? "").trim().toUpperCase().replace(/^\$/, "");
-    const unlock_amount = toNum(parts[3]);
+    const rawAmount = parts[3];
+    const unlock_amount = rawAmount != null && String(rawAmount).trim() !== ""
+      ? normalizeAmount(rawAmount)
+      : null;
     const unlock_percent = toNum(parts[4]);
     const dateStr = parts[5] ?? "";
     const unlock_timestamp = parseUtcToUnixSeconds(dateStr);
@@ -74,7 +98,7 @@ function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
       skipped++;
       continue;
     }
-    if (unlock_amount == null || unlock_amount < 0) {
+    if (unlock_amount != null && unlock_amount < 0) {
       skipped++;
       continue;
     }
@@ -82,7 +106,7 @@ function parseCmcCsv(content: string): { rows: ParsedRow[]; skipped: number } {
     rows.push({
       token_symbol,
       unlock_timestamp,
-      unlock_amount,
+      unlock_amount: unlock_amount != null && unlock_amount >= 0 ? unlock_amount : null,
       unlock_percent: unlock_percent != null && unlock_percent >= 0 ? unlock_percent : null,
       source: SOURCE,
     });
@@ -181,6 +205,10 @@ export async function importManualRegistryFromCmcCsv(csvPath?: string): Promise<
     }
 
     await client.query("COMMIT");
+    logger.info(
+      { csvRows: allRows.length + skipped, eventsInserted: processed, skipped },
+      "REGISTRY_IMPORT_COMPLETE"
+    );
     logger.info(
       { rows_processed: processed, batches: Math.ceil(allRows.length / BATCH_SIZE), skipped },
       "MANUAL_REGISTRY_CMC_IMPORT_SUCCESS"
