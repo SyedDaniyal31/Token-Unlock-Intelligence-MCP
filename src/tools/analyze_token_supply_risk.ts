@@ -468,8 +468,8 @@ function buildUnlockOnlySupplyRisk(
     try {
       full.vesting_schedule = parseVestingFromEvents(
         unlockData.unlock_events_full,
-        0,
-        0,
+        null,
+        null,
         token_symbol
       );
     } catch {

@@ -799,10 +799,15 @@ export async function runDynamicSupplyEngine(
   if (unlock_data_available && unlockData.events.length > 0) {
     try {
       const circ = enrichment?.circulatingSupply;
+      const total = totalSupply > 0 ? totalSupply : null;
+      const circulating =
+        circ != null && Number.isFinite(circ) && circ > 0
+          ? circ
+          : (totalSupply > 0 ? totalSupply : null);
       out.vesting_schedule = parseVestingFromEvents(
         unlockData.events,
-        totalSupply,
-        circ != null && Number.isFinite(circ) ? circ : totalSupply,
+        total,
+        circulating,
         asset.symbol
       );
     } catch {
@@ -949,7 +954,7 @@ function buildCalendarOnlyOutput(
   });
   if (events.length > 0) {
     try {
-      out.vesting_schedule = parseVestingFromEvents(events, 0, 0, asset.symbol);
+      out.vesting_schedule = parseVestingFromEvents(events, null, null, asset.symbol);
     } catch {
       /* fallback to event-level response */
     }

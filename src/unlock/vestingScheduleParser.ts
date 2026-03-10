@@ -9,11 +9,12 @@ export type UnlockCategory = "team" | "investor" | "ecosystem" | "foundation" | 
 
 export interface VestingScheduleOutput {
   token: string;
-  total_supply: number;
-  circulating_supply: number;
+  total_supply: number | null;
+  circulating_supply: number | null;
   next_unlock_date: string | null;
   next_unlock_amount: number;
-  unlock_percent_of_circulating: number;
+  /** Only set when circulating_supply > 0; null when supply is unknown. */
+  unlock_percent_of_circulating: number | null;
   unlock_category: UnlockCategory;
   /** Cliff period in days if detectable; null otherwise. */
   cliff_period_days?: number | null;
@@ -92,11 +93,12 @@ function estimateCliffDays(events: NormalizedUnlockEvent[], nowSec: number): num
 
 /**
  * Parse unlock events and supply into a structured vesting schedule output.
+ * Pass null for totalSupply/circulatingSupply when unknown; unlock_percent_of_circulating will be null when supply is unavailable.
  */
 export function parseVestingFromEvents(
   events: NormalizedUnlockEvent[],
-  totalSupply: number,
-  circulatingSupply: number,
+  totalSupply: number | null,
+  circulatingSupply: number | null,
   tokenSymbol: string
 ): VestingScheduleOutput {
   const nowSec = NOW_SEC();
@@ -109,17 +111,21 @@ export function parseVestingFromEvents(
     ? new Date(nextEvent.unlock_timestamp * 1000).toISOString().slice(0, 10)
     : null;
   const next_unlock_amount = nextEvent ? nextEvent.unlock_amount : 0;
-  const circulating = circulatingSupply > 0 ? circulatingSupply : totalSupply || 1;
-  const unlock_percent_of_circulating =
-    next_unlock_amount > 0 && circulating > 0
-      ? (next_unlock_amount / circulating) * 100
-      : 0;
+
+  const circ = circulatingSupply != null && Number.isFinite(circulatingSupply) && circulatingSupply > 0
+    ? circulatingSupply
+    : (totalSupply != null && Number.isFinite(totalSupply) && totalSupply > 0 ? totalSupply : null);
+  const unlock_percent_of_circulating: number | null =
+    next_unlock_amount > 0 && circ != null && circ > 0
+      ? (next_unlock_amount / circ) * 100
+      : null;
+
   const unlock_category = nextEvent ? inferCategory(nextEvent) : "unknown";
 
   const out: VestingScheduleOutput = {
     token: tokenSymbol,
-    total_supply: totalSupply,
-    circulating_supply: circulatingSupply,
+    total_supply: totalSupply != null && Number.isFinite(totalSupply) ? totalSupply : null,
+    circulating_supply: circulatingSupply != null && Number.isFinite(circulatingSupply) ? circulatingSupply : null,
     next_unlock_date,
     next_unlock_amount,
     unlock_percent_of_circulating,

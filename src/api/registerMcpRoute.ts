@@ -273,14 +273,14 @@ const MCP_TOOLS = [
         },
         vesting_schedule: {
           type: "object" as const,
-          description: "Parsed vesting schedule when unlock events exist (token, total_supply, circulating_supply, next_unlock_date, next_unlock_amount, unlock_percent_of_circulating, unlock_category).",
+          description: "Parsed vesting schedule when unlock events exist. total_supply/circulating_supply and unlock_percent_of_circulating are null when supply is unknown.",
           properties: {
             token: { type: "string" as const },
-            total_supply: { type: "number" as const },
-            circulating_supply: { type: "number" as const },
+            total_supply: { type: ["number", "null"] as const },
+            circulating_supply: { type: ["number", "null"] as const },
             next_unlock_date: { type: ["string", "null"] as const },
             next_unlock_amount: { type: "number" as const },
-            unlock_percent_of_circulating: { type: "number" as const },
+            unlock_percent_of_circulating: { type: ["number", "null"] as const },
             unlock_category: { type: "string" as const, enum: ["team", "investor", "ecosystem", "foundation", "unknown"] as const },
           },
         },
