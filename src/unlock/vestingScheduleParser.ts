@@ -15,6 +15,8 @@ export interface VestingScheduleOutput {
   next_unlock_amount: number;
   /** Only set when circulating_supply > 0; null when supply is unknown. */
   unlock_percent_of_circulating: number | null;
+  /** (next_unlock_amount / total_supply) * 100 when both present and total_supply > 0; null otherwise. Rounded to 2 decimals. */
+  unlock_percent_of_total_supply: number | null;
   unlock_category: UnlockCategory;
   /** Cliff period in days if detectable; null otherwise. */
   cliff_period_days?: number | null;
@@ -117,8 +119,15 @@ export function parseVestingFromEvents(
     : (totalSupply != null && Number.isFinite(totalSupply) && totalSupply > 0 ? totalSupply : null);
   const unlock_percent_of_circulating: number | null =
     next_unlock_amount > 0 && circ != null && circ > 0
-      ? (next_unlock_amount / circ) * 100
+      ? Number(((next_unlock_amount / circ) * 100).toFixed(2))
       : null;
+
+  const totalNum = totalSupply != null ? Number(totalSupply) : null;
+  const amountNum = next_unlock_amount != null ? Number(next_unlock_amount) : 0;
+  let unlock_percent_of_total_supply: number | null = null;
+  if (amountNum && totalNum != null && totalNum > 0) {
+    unlock_percent_of_total_supply = Number(((amountNum / totalNum) * 100).toFixed(2));
+  }
 
   const unlock_category = nextEvent ? inferCategory(nextEvent) : "unknown";
 
@@ -129,6 +138,7 @@ export function parseVestingFromEvents(
     next_unlock_date,
     next_unlock_amount,
     unlock_percent_of_circulating,
+    unlock_percent_of_total_supply,
     unlock_category,
   };
 

@@ -135,6 +135,8 @@ export interface DynamicSupplyOutput {
   supply_unlock_percent?: number;
   /** Unlock % of total supply from manual registry (e.g. 30.2). Use for display; do not recalculate. */
   registry_unlock_percent?: number | null;
+  /** (next_unlock_amount / total_supply) * 100 when both present; null otherwise. For UI "Unlock % of Total Supply". */
+  unlock_percent_of_total_supply?: number | null;
   /** New risk model outputs. */
   event_severity_label?: string;
   absorption_risk_label?: string;
@@ -455,9 +457,16 @@ export async function runDynamicSupplyEngine(
     unlockIntelSource !== "inferred" &&
     (unlockIntelEvents.length > 0 || nextUnlockTs !== null);
 
-  // Supply shock severity: use manual registry unlock_percent when present; do not recalculate from total_supply.
+  // Supply shock severity: use manual registry unlock_percent when present; else compute from next_unlock_amount / total_supply.
   let supplyUnlockPercent = 0;
   let registryUnlockPercent: number | null = null;
+  let unlockPercentOfTotalSupply: number | null = null;
+  const totalSupplyNum = Number(totalSupply);
+  const nextUnlockEvent = unlockData.events
+    .filter((e) => e.unlock_timestamp > Math.floor(executionNowMs / 1000))
+    .sort((a, b) => a.unlock_timestamp - b.unlock_timestamp)[0] ?? null;
+  const nextUnlockAmount = nextUnlockEvent != null ? Number(nextUnlockEvent.unlock_amount) : 0;
+
   if (unlock_data_available && unlockData.events.length > 0) {
     const rawPcts = unlockData.events
       .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent : null))
@@ -466,10 +475,15 @@ export async function runDynamicSupplyEngine(
       registryUnlockPercent = Number(Number(Math.max(...rawPcts)).toFixed(2));
       supplyUnlockPercent = Math.min(1, Math.max(0, registryUnlockPercent / 100));
     } else {
-      const supplyForCalc = Math.max(1, totalSupply);
-      if (totalUnlockTokens > 0) {
+      const supplyForCalc = Math.max(1, totalSupplyNum);
+      if (nextUnlockAmount > 0 && totalSupplyNum > 0) {
+        supplyUnlockPercent = Math.min(1, Math.max(0, nextUnlockAmount / supplyForCalc));
+      } else if (totalUnlockTokens > 0) {
         supplyUnlockPercent = Math.min(1, Math.max(0, totalUnlockTokens / supplyForCalc));
       }
+    }
+    if (nextUnlockAmount && totalSupplyNum > 0) {
+      unlockPercentOfTotalSupply = Number(((nextUnlockAmount / totalSupplyNum) * 100).toFixed(2));
     }
   }
   const hasUnlockData = unlock_data_available;
@@ -794,6 +808,7 @@ export async function runDynamicSupplyEngine(
   if (unlock_data_available) {
     out.supply_unlock_percent = Number(Number(supplyUnlockPercent).toFixed(4));
     out.registry_unlock_percent = registryUnlockPercent;
+    out.unlock_percent_of_total_supply = unlockPercentOfTotalSupply;
   }
 
   if (unlock_data_available && unlockData.events.length > 0) {
@@ -810,6 +825,9 @@ export async function runDynamicSupplyEngine(
         circulating,
         asset.symbol
       );
+      if (out.vesting_schedule?.unlock_percent_of_total_supply != null) {
+        out.unlock_percent_of_total_supply = out.vesting_schedule.unlock_percent_of_total_supply;
+      }
     } catch {
       /* fallback to event-level response */
     }

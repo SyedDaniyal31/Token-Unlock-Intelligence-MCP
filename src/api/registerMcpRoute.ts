@@ -281,6 +281,7 @@ const MCP_TOOLS = [
             next_unlock_date: { type: ["string", "null"] as const },
             next_unlock_amount: { type: "number" as const },
             unlock_percent_of_circulating: { type: ["number", "null"] as const },
+            unlock_percent_of_total_supply: { type: ["number", "null"] as const, description: "(next_unlock_amount / total_supply) * 100; null when supply unknown." },
             unlock_category: { type: "string" as const, enum: ["team", "investor", "ecosystem", "foundation", "unknown"] as const },
           },
         },
@@ -485,7 +486,17 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
       : supplyUnlockPct != null
         ? Number((supplyUnlockPct * 100).toFixed(2))
         : null;
-  if (unlockPercent == null) {
+  const unlockPercentOfTotalSupply =
+    typeof obj.unlock_percent_of_total_supply === "number" && Number.isFinite(obj.unlock_percent_of_total_supply as number)
+      ? Number((obj.unlock_percent_of_total_supply as number).toFixed(2))
+      : null;
+  const vestingTotalPct =
+    obj.vesting_schedule != null &&
+    typeof (obj.vesting_schedule as Record<string, unknown>).unlock_percent_of_total_supply === "number" &&
+    Number.isFinite((obj.vesting_schedule as Record<string, unknown>).unlock_percent_of_total_supply as number)
+      ? Number(((obj.vesting_schedule as Record<string, unknown>).unlock_percent_of_total_supply as number).toFixed(2))
+      : null;
+  if (unlockPercent == null && unlockPercentOfTotalSupply == null && vestingTotalPct == null) {
     console.warn("Unlock percent missing in manual registry");
   }
   const nextTs = typeof obj.next_estimated_unlock_timestamp === "number" && Number.isFinite(obj.next_estimated_unlock_timestamp as number)
@@ -502,7 +513,7 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     : undefined;
 
   const riskLabels = getRiskLabels(obj);
-  const magnitudePct = unlockPercent;
+  const magnitudePct = unlockPercentOfTotalSupply ?? vestingTotalPct ?? unlockPercent;
   const eventDate = nextTs != null ? formatEventDate(nextTs) : null;
   const daysUntilUnlock = nextTs != null ? Math.max(0, Math.ceil((nextTs - now) / 86400)) : null;
   const volumeRatioDays = Number((unlockPressureRatio * 30).toFixed(1));
@@ -520,7 +531,7 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     final_risk_tier: riskLabels.final_risk_tier,
   };
 
-  const marketInterpretation = getMarketInterpretation(unlockPercent != null ? unlockPercent / 100 : 0);
+  const marketInterpretation = getMarketInterpretation(magnitudePct != null ? magnitudePct / 100 : 0);
 
   out.market_impact_analysis = {
     volume_ratio_days: volumeRatioDays,
