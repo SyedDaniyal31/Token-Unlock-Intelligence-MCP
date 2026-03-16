@@ -63,16 +63,20 @@ async function bootstrap(): Promise<void> {
     logger.warn({ err }, "Initial registry sync failed; continuing (idempotent on next cycle).");
   }
 
-  start(config.PORT);
+  // Import manual_registry.csv into unlock_events_external before serving traffic so
+  // registry-backed tokens are available to the runtime query engine.
+  try {
+    const csvPath = path.join(__dirname, "scripts", "manual_registry.csv");
+    const rows = await importManualRegistryFromCmcCsv(csvPath);
+    if (rows > 0) {
+      logger.info({ rows }, "Manual registry CMC CSV imported");
+    }
+    await logRegistrySymbolCounts();
+  } catch (err) {
+    logger.warn({ err }, "Manual registry CMC import failed; continuing.");
+  }
 
-  // Run manual registry import in background so server is up immediately; import failures don't block startup
-  const csvPath = path.join(__dirname, "scripts", "manual_registry.csv");
-  importManualRegistryFromCmcCsv(csvPath)
-    .then(async (rows) => {
-      if (rows > 0) logger.info({ rows }, "Manual registry CMC CSV imported");
-      await logRegistrySymbolCounts();
-    })
-    .catch((err) => logger.warn({ err }, "Manual registry CMC import failed; continuing."));
+  start(config.PORT);
 }
 
 bootstrap().catch((err) => {

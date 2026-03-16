@@ -80,13 +80,23 @@ export async function ensureManualRegistryTableChecked(): Promise<void> {
   }
 }
 
-const STARTUP_VALIDATION_SYMBOLS = ["SEI", "ENA", "HYPE", "ARB", "OP", "SUI"];
+const STARTUP_VALIDATION_SYMBOLS = ["HYPE", "ENA", "ARB", "JUP", "W", "TIA", "SUI"];
 
 /**
- * Log unlock_events_external row counts for key symbols (startup validation).
+ * Log unlock_events_external row counts for key symbols (startup validation),
+ * along with a global total row count.
  */
 export async function logRegistrySymbolCounts(): Promise<void> {
   try {
+    const totalRes = await query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM unlock_events_external`
+    );
+    const totalCount = totalRes?.rows?.[0]?.count ?? "0";
+    logger.info(
+      { table: TABLE_NAME, totalRows: Number(totalCount) },
+      "REGISTRY_TOTAL_ROW_COUNT"
+    );
+
     for (const symbol of STARTUP_VALIDATION_SYMBOLS) {
       const r = await query<{ count: string }>(
         `SELECT COUNT(*) AS count FROM unlock_events_external WHERE UPPER(TRIM(token_symbol)) = $1`,
