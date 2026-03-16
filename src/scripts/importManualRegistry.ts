@@ -28,7 +28,10 @@ interface ParsedRow {
 function parseUtcToUnixSeconds(dateStr: string): number | null {
   const s = (dateStr ?? "").trim();
   if (!s) return null;
-  const d = new Date(s);
+  const normalized = s.endsWith(" UTC")
+    ? s.replace(" UTC", "Z").replace(" ", "T")
+    : s;
+  const d = new Date(normalized);
   if (!Number.isFinite(d.getTime())) return null;
   return Math.floor(d.getTime() / 1000);
 }

@@ -19,6 +19,7 @@ export const manualRegistryProvider: UnlockProvider = {
 
   async fetchUnlocks(asset: AssetMetadata): Promise<UnlockFetchResult> {
     try {
+      const nowSec = Math.floor(Date.now() / 1000);
       const symbol = asset.symbol.toUpperCase().trim();
       const result = await query<{
         token_symbol: string;
@@ -30,9 +31,10 @@ export const manualRegistryProvider: UnlockProvider = {
         `SELECT token_symbol, unlock_timestamp, unlock_amount, unlock_percent, source
          FROM unlock_events_external
          WHERE UPPER(TRIM(token_symbol)) = UPPER(TRIM($1))
+           AND unlock_timestamp > $2
          ORDER BY unlock_timestamp ASC
          LIMIT 500`,
-        [symbol]
+        [symbol, nowSec]
       );
 
       const rows = result?.rows ?? [];
@@ -68,7 +70,7 @@ export const manualRegistryProvider: UnlockProvider = {
 
       logger.info(
         { token_symbol: symbol, registryEventsFound: events.length },
-        "MANUAL_REGISTRY_QUERY_RESULT"
+        "REGISTRY_LOOKUP_RESULT"
       );
 
       return {
