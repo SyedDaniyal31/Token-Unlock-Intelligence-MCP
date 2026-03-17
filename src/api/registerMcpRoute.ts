@@ -50,7 +50,7 @@ const MCP_TOOLS = [
   {
     name: SUPPLY_RISK_TOOL_NAME,
     description:
-      "Comprehensive token unlock and supply risk engine. Includes scheduled unlock analysis, liquidity absorption modeling, and composite risk scoring. Use this tool for TITN-type queries, unlock event assessment, market impact analysis, severity classification, and risk tier. Supports Ethereum, Arbitrum, BSC, Base. Provide token_symbol for registry/calendar analysis, or token_address + chain for full on-chain analysis. This tool supersedes legacy unlock-only endpoints.",
+      "Comprehensive token unlock and supply risk engine. Includes scheduled unlock analysis, liquidity absorption modeling, and composite risk scoring. Use this tool for TITN-type queries, unlock event assessment, market impact analysis, severity classification, and risk tier. Supports Ethereum, Arbitrum, BSC, Base. Provide token_symbol for registry/calendar analysis, or token_address + chain for full on-chain analysis. This tool supersedes legacy unlock-only endpoints. Try asking: Analyze the upcoming unlock risk for HYPE; When is the next ENA token unlock?; Show upcoming unlock events for ARB; Analyze Jupiter (JUP) token unlock schedule; Which tokens have large unlocks in the next 30 days?; Analyze TIA and SUI token supply unlock risk.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -517,6 +517,15 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
   const eventDate = nextTs != null ? formatEventDate(nextTs) : null;
   const daysUntilUnlock = nextTs != null ? Math.max(0, Math.ceil((nextTs - now) / 86400)) : null;
   const volumeRatioDays = Number((unlockPressureRatio * 30).toFixed(1));
+  const unlockPercentOfCirculating =
+    obj.vesting_schedule != null &&
+    typeof (obj.vesting_schedule as Record<string, unknown>).unlock_percent_of_circulating === "number" &&
+    Number.isFinite((obj.vesting_schedule as Record<string, unknown>).unlock_percent_of_circulating as number)
+      ? Number(
+          ((obj.vesting_schedule as Record<string, unknown>)
+            .unlock_percent_of_circulating as number).toFixed(2)
+        )
+      : null;
 
   out.unlock_event_assessment = {
     severity: riskLabels.event_severity_label,
@@ -538,6 +547,17 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
     liquidity_absorption_classification: riskLabels.absorption_risk_label,
     market_interpretation: marketInterpretation,
   };
+
+  const meetsMagnitudeThreshold =
+    (magnitudePct != null && magnitudePct >= 5) ||
+    volumeRatioDays >= 1 ||
+    (unlockPercentOfCirculating != null && unlockPercentOfCirculating >= 1);
+  const withinThirtyDays =
+    daysUntilUnlock != null && Number.isFinite(daysUntilUnlock) && daysUntilUnlock >= 0 && daysUntilUnlock <= 30;
+  (out as Record<string, unknown>).unlock_percent_of_supply = magnitudePct;
+  (out as Record<string, unknown>).unlock_percent_of_circulating = unlockPercentOfCirculating;
+  (out as Record<string, unknown>).has_large_30d_unlock =
+    Boolean(meetsMagnitudeThreshold && withinThirtyDays);
 
   const lines: string[] = [];
   lines.push("=== Unlock Event Assessment ===");
