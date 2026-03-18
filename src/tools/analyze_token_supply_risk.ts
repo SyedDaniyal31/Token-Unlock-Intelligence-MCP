@@ -54,6 +54,7 @@ import { resolveAsset } from "../core/assetResolver.js";
 import { fetchUnlockData } from "../core/dataFetchLayer.js";
 import { parseVestingFromEvents } from "../unlock/vestingScheduleParser.js";
 import logger from "../core/logger.js";
+import { MANUAL_REGISTRY_SYMBOLS } from "../intelligence/manualRegistrySymbols.generated.js";
 
 const TWELVE_MONTHS_MS = 365 * 24 * 60 * 60 * 1000;
 const DEFAULT_TIMEFRAME_DAYS = 30;
@@ -200,6 +201,15 @@ export interface SupplyRiskError {
 }
 
 export type SupplyRiskResult = SupplyRiskOutput | SupplyRiskError;
+
+export interface HighImpactUnlockEntry {
+  token_symbol: string;
+  final_risk_tier: string;
+  unlock_percent_of_supply: number | null;
+  next_estimated_unlock_timestamp: number | null;
+  days_until_unlock: number | null;
+  analysis_scope: SupplyRiskOutputFlat["analysis_scope"];
+}
 
 /**
  * Build a valid SupplyRiskOutputFlat for business-logic failures (unsupported token, timeout, no data).
@@ -867,6 +877,86 @@ export async function runAnalyzeTokenSupplyRisk(
     return { success: true, data: noData };
   }
   return { success: true, data: flat };
+}
+
+/**
+ * Registry-wide scan: iterate all manual-registry symbols, run the same
+ * analyze_token_supply_risk pipeline used for individual tokens, and return
+ * only tokens with final_risk_tier >= ELEVATED, sorted by
+ * unlock_percent_of_supply (desc).
+ */
+export async function scanRegistryHighImpactUnlocks(
+  deps: UnlockIntelligenceDeps,
+  options?: {
+    timeframe_days?: number;
+    /** Minimum tier to include; default "ELEVATED". */
+    min_risk_tier?: "ELEVATED" | "HIGH" | "CRITICAL";
+    /** Optional cap on number of returned entries (after sorting). */
+    limit?: number;
+  }
+): Promise<HighImpactUnlockEntry[]> {
+  const symbols = Array.from(MANUAL_REGISTRY_SYMBOLS);
+  const timeframeDays = typeof options?.timeframe_days === "number" ? options.timeframe_days : DEFAULT_TIMEFRAME_DAYS;
+  const minTier = options?.min_risk_tier ?? "ELEVATED";
+  const allowedTiers: Set<string> =
+    minTier === "CRITICAL"
+      ? new Set(["CRITICAL"])
+      : minTier === "HIGH"
+        ? new Set(["HIGH", "CRITICAL"])
+        : new Set(["ELEVATED", "HIGH", "CRITICAL"]);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const results: HighImpactUnlockEntry[] = [];
+
+  for (const symbol of symbols) {
+    const res = await runAnalyzeTokenSupplyRisk(
+      { token_symbol: symbol, timeframe_days: timeframeDays },
+      deps
+    );
+    if (!res.success) continue;
+    const data = res.data as SupplyRiskOutputFlat | UnsupportedChainData;
+    if ((data as UnsupportedChainData).status === "unsupported_chain") continue;
+    const flat = data as SupplyRiskOutputFlat;
+
+    if (!flat.final_risk_tier || !allowedTiers.has(String(flat.final_risk_tier))) continue;
+    if (flat.unlock_schedule_status !== "active") continue;
+
+    // Prefer registry unlock percent (manual registry) when present, else vesting schedule % of total supply.
+    let unlockPercentOfSupply: number | null = null;
+    if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
+      unlockPercentOfSupply = flat.registry_unlock_percent;
+    } else if (
+      flat.vesting_schedule &&
+      typeof flat.vesting_schedule.unlock_percent_of_total_supply === "number" &&
+      Number.isFinite(flat.vesting_schedule.unlock_percent_of_total_supply)
+    ) {
+      unlockPercentOfSupply = flat.vesting_schedule.unlock_percent_of_total_supply;
+    }
+
+    const ts = flat.next_estimated_unlock_timestamp;
+    const daysUntil =
+      ts != null && Number.isFinite(ts) ? Math.max(0, Math.ceil(ts - nowSec) / 86400) : null;
+
+    results.push({
+      token_symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
+      final_risk_tier: String(flat.final_risk_tier),
+      unlock_percent_of_supply: unlockPercentOfSupply,
+      next_estimated_unlock_timestamp: ts ?? null,
+      days_until_unlock: daysUntil,
+      analysis_scope: flat.analysis_scope,
+    });
+  }
+
+  results.sort((a, b) => {
+    const av = typeof a.unlock_percent_of_supply === "number" ? a.unlock_percent_of_supply : 0;
+    const bv = typeof b.unlock_percent_of_supply === "number" ? b.unlock_percent_of_supply : 0;
+    return bv - av;
+  });
+
+  if (typeof options?.limit === "number" && options.limit > 0) {
+    return results.slice(0, options.limit);
+  }
+  return results;
 }
 
 function mapRegistryResultToFlat(

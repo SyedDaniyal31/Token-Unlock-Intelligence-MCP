@@ -10,6 +10,7 @@ import type { RequestHandler } from "express";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import {
   runAnalyzeTokenSupplyRisk,
+  scanRegistryHighImpactUnlocks,
   buildSoftFailureSupplyRisk,
   buildCompletedNoDataSupplyRisk,
   type SupplyRiskOutputFlat,
@@ -831,6 +832,37 @@ async function handleAnalyzeTokenSupplyRisk(
   args: Record<string, unknown>,
   deps: UnlockIntelligenceDeps
 ): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
+  const registryScan =
+    (args as { registry_scan?: unknown }).registry_scan === true;
+  if (registryScan) {
+    try {
+      const timeframeDays =
+        typeof (args as { timeframe_days?: unknown }).timeframe_days === "number"
+          ? ((args as { timeframe_days: number }).timeframe_days)
+          : undefined;
+      const minTierRaw = (args as { min_risk_tier?: unknown }).min_risk_tier;
+      const minTier =
+        minTierRaw === "HIGH" || minTierRaw === "CRITICAL" || minTierRaw === "ELEVATED"
+          ? minTierRaw
+          : "ELEVATED";
+      const limit =
+        typeof (args as { limit?: unknown }).limit === "number"
+          ? ((args as { limit: number }).limit)
+          : undefined;
+      const entries = await scanRegistryHighImpactUnlocks(deps, {
+        timeframe_days: timeframeDays,
+        min_risk_tier: minTier,
+        limit,
+      });
+      return jsonRpcSuccess(id, {
+        registry_high_impact_unlocks: entries,
+      });
+    } catch (err) {
+      logger.error({ err }, "REGISTRY_HIGH_IMPACT_SCAN_FAILED");
+      const softFailure = buildSoftFailureSupplyRisk("REGISTRY_SCAN_FAILED", 0);
+      return jsonRpcSuccess(id, softFailure);
+    }
+  }
   type ChainSlug = "ethereum" | "arbitrum" | "bsc" | "base";
   let chainSlug: ChainSlug | undefined =
     (args.chain === "ethereum" || args.chain === "arbitrum" || args.chain === "bsc" || args.chain === "base") ? (args.chain as ChainSlug) : undefined;
@@ -944,12 +976,14 @@ async function handleCallTool(
   const tokenAddressArg = typeof (args as { token_address?: unknown }).token_address === "string"
     ? (args as { token_address: string }).token_address.trim()
     : "";
+  const registryScan =
+    (args as { registry_scan?: unknown }).registry_scan === true;
 
   if (name === SUPPLY_RISK_TOOL_NAME) {
     if (tokenSymbol != null && typeof tokenSymbol !== "string") {
       return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
     }
-    if (!token && !tokenAddressArg) {
+    if (!token && !tokenAddressArg && !registryScan) {
       logger.warn({ tool: name }, "MCP missing token_symbol or token_address");
       return jsonRpcError(id, -32602, "Missing required argument: token_symbol or token_address. For dynamic analysis provide token_address and chain.");
     }
