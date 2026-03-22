@@ -224,10 +224,141 @@ export interface UpcomingUnlockRow {
   days_until: number;
   unlock_percent: number;
   volume_ratio_days: number;
+  /** (unlock_percent * 0.6) + (volume_ratio_days * 0.4) */
+  impact_score: number;
+}
+
+/** Same-calendar-day unlock cluster (2+ distinct tokens). */
+export interface ClusterWarning {
+  date: string;
+  tokens: string[];
+  message: string;
 }
 
 export interface ScanUpcomingUnlocksResult {
   upcoming_unlocks: UpcomingUnlockRow[];
+  cluster_warnings: ClusterWarning[];
+  /** Human-readable trader summary (also derivable from structured fields). */
+  key_insights: string;
+}
+
+/** Parallel batch size for registry scan (Promise.all per batch; preserves Redis/DB load). */
+const SCAN_SYMBOL_CONCURRENCY = 12;
+
+function computeImpactScore(unlockPercent: number, volumeRatioDays: number): number {
+  const score = unlockPercent * 0.6 + volumeRatioDays * 0.4;
+  return Math.round(score * 100) / 100;
+}
+
+async function fetchUpcomingUnlockRowForSymbol(
+  symbol: string,
+  deps: UnlockIntelligenceDeps,
+  maxDays: number,
+  nowSec: number
+): Promise<UpcomingUnlockRow | null> {
+  try {
+    const res = await runAnalyzeTokenSupplyRisk(
+      { token_symbol: symbol, timeframe_days: maxDays },
+      deps
+    );
+    if (!res.success) return null;
+    const data = res.data as SupplyRiskOutputFlat | UnsupportedChainData;
+    if ((data as UnsupportedChainData).status === "unsupported_chain") return null;
+    const flat = data as SupplyRiskOutputFlat;
+
+    if (flat.unlock_schedule_status !== "active") return null;
+    const ts = flat.next_estimated_unlock_timestamp;
+    if (ts == null || !Number.isFinite(ts)) return null;
+
+    const daysUntil = Math.ceil((ts - nowSec) / 86400);
+    if (daysUntil < 0 || daysUntil > maxDays) return null;
+
+    let unlockPercent: number | null = null;
+    if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
+      unlockPercent = flat.registry_unlock_percent;
+    } else if (
+      flat.vesting_schedule &&
+      typeof flat.vesting_schedule.unlock_percent_of_total_supply === "number" &&
+      Number.isFinite(flat.vesting_schedule.unlock_percent_of_total_supply)
+    ) {
+      unlockPercent = flat.vesting_schedule.unlock_percent_of_total_supply;
+    }
+
+    if (unlockPercent == null || !(unlockPercent > 0)) return null;
+
+    const pressure =
+      typeof flat.unlock_pressure_ratio === "number" && Number.isFinite(flat.unlock_pressure_ratio)
+        ? flat.unlock_pressure_ratio
+        : 0;
+    const volumeRatioDays = Number((pressure * 30).toFixed(1));
+    const unlock_date = new Date(ts * 1000).toISOString().slice(0, 10);
+    const impact_score = computeImpactScore(unlockPercent, volumeRatioDays);
+
+    return {
+      symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
+      risk_tier: String(flat.final_risk_tier ?? "MINOR"),
+      severity: String(flat.event_severity_label ?? "MINIMAL"),
+      unlock_date,
+      days_until: Math.max(0, daysUntil),
+      unlock_percent: unlockPercent,
+      volume_ratio_days: volumeRatioDays,
+      impact_score,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildClusterWarnings(rows: UpcomingUnlockRow[]): ClusterWarning[] {
+  const byDate = new Map<string, Set<string>>();
+  for (const r of rows) {
+    if (!byDate.has(r.unlock_date)) byDate.set(r.unlock_date, new Set());
+    byDate.get(r.unlock_date)!.add(r.symbol);
+  }
+  const warnings: ClusterWarning[] = [];
+  const msg = "Multiple tokens unlocking on the same day may increase market volatility.";
+  for (const [date, syms] of [...byDate.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    if (syms.size >= 2) {
+      warnings.push({
+        date,
+        tokens: [...syms].sort(),
+        message: msg,
+      });
+    }
+  }
+  return warnings;
+}
+
+function buildKeyInsights(rows: UpcomingUnlockRow[], clusterWarnings: ClusterWarning[]): string {
+  const lines: string[] = ["Key Insights:", ""];
+
+  if (rows.length === 0) {
+    lines.push("- No qualifying upcoming unlocks in this window.");
+    return lines.join("\n");
+  }
+
+  const top = rows.reduce((best, r) => (r.impact_score > best.impact_score ? r : best), rows[0]!);
+  lines.push(
+    `- Highest Impact Unlock: ${top.symbol} (impact_score ${top.impact_score}, ${top.unlock_percent}% of supply, ${top.volume_ratio_days} volume-days, unlock ${top.unlock_date})`
+  );
+
+  if (clusterWarnings.length > 0) {
+    const parts = clusterWarnings.map((c) => `${c.date} (${c.tokens.join(", ")})`);
+    lines.push(`- Cluster Warning: ${clusterWarnings.length} day(s) with 2+ tokens — ${parts.join("; ")}`);
+  } else {
+    lines.push("- Cluster Warning: none (no same-day multi-token clusters in this set).");
+  }
+
+  const immediate = rows.filter((r) => r.days_until <= 3).sort((a, b) => a.days_until - b.days_until);
+  if (immediate.length > 0) {
+    lines.push(
+      `- Immediate Events (≤3 days): ${immediate.map((r) => `${r.symbol} in ${r.days_until}d (${r.unlock_date})`).join("; ")}`
+    );
+  } else {
+    lines.push("- Immediate Events: none unlocking within the next 3 days in this result set.");
+  }
+
+  return lines.join("\n");
 }
 
 /**
@@ -265,6 +396,7 @@ function loadUnlockRegistryJsonSymbols(): string[] {
 /**
  * Global registry scan for MCP tool `scan_upcoming_unlocks`.
  * No token_symbol required. Uses same engine as analyze_token_supply_risk per symbol.
+ * Scans symbols in parallel batches (Promise.all) for throughput while limiting concurrency.
  */
 export async function scanUpcomingUnlocks(
   deps: UnlockIntelligenceDeps,
@@ -276,59 +408,27 @@ export async function scanUpcomingUnlocks(
   const nowSec = Math.floor(Date.now() / 1000);
   const rows: UpcomingUnlockRow[] = [];
 
-  for (const symbol of symbols) {
-    const res = await runAnalyzeTokenSupplyRisk(
-      { token_symbol: symbol, timeframe_days: maxDays },
-      deps
+  for (let i = 0; i < symbols.length; i += SCAN_SYMBOL_CONCURRENCY) {
+    const batch = symbols.slice(i, i + SCAN_SYMBOL_CONCURRENCY);
+    const batchRows = await Promise.all(
+      batch.map((symbol) => fetchUpcomingUnlockRowForSymbol(symbol, deps, maxDays, nowSec))
     );
-    if (!res.success) continue;
-    const data = res.data as SupplyRiskOutputFlat | UnsupportedChainData;
-    if ((data as UnsupportedChainData).status === "unsupported_chain") continue;
-    const flat = data as SupplyRiskOutputFlat;
-
-    if (flat.unlock_schedule_status !== "active") continue;
-    const ts = flat.next_estimated_unlock_timestamp;
-    if (ts == null || !Number.isFinite(ts)) continue;
-
-    const daysUntil = Math.ceil((ts - nowSec) / 86400);
-    if (daysUntil < 0 || daysUntil > maxDays) continue;
-
-    let unlockPercent: number | null = null;
-    if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
-      unlockPercent = flat.registry_unlock_percent;
-    } else if (
-      flat.vesting_schedule &&
-      typeof flat.vesting_schedule.unlock_percent_of_total_supply === "number" &&
-      Number.isFinite(flat.vesting_schedule.unlock_percent_of_total_supply)
-    ) {
-      unlockPercent = flat.vesting_schedule.unlock_percent_of_total_supply;
+    for (const row of batchRows) {
+      if (row != null) rows.push(row);
     }
-
-    if (unlockPercent == null || !(unlockPercent > 0)) continue;
-
-    const pressure =
-      typeof flat.unlock_pressure_ratio === "number" && Number.isFinite(flat.unlock_pressure_ratio)
-        ? flat.unlock_pressure_ratio
-        : 0;
-    const volumeRatioDays = Number((pressure * 30).toFixed(1));
-    const unlock_date = new Date(ts * 1000).toISOString().slice(0, 10);
-
-    rows.push({
-      symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
-      risk_tier: String(flat.final_risk_tier ?? "MINOR"),
-      severity: String(flat.event_severity_label ?? "MINIMAL"),
-      unlock_date,
-      days_until: Math.max(0, daysUntil),
-      unlock_percent: unlockPercent,
-      volume_ratio_days: volumeRatioDays,
-    });
   }
 
-  rows.sort((a, b) => b.unlock_percent - a.unlock_percent);
-  if (limit != null) {
-    return { upcoming_unlocks: rows.slice(0, limit) };
-  }
-  return { upcoming_unlocks: rows };
+  rows.sort((a, b) => b.impact_score - a.impact_score);
+  /** Clusters and insights use full qualifying set; list respects optional limit. */
+  const cluster_warnings = buildClusterWarnings(rows);
+  const key_insights = buildKeyInsights(rows, cluster_warnings);
+  const upcoming_unlocks = limit != null ? rows.slice(0, limit) : rows;
+
+  return {
+    upcoming_unlocks,
+    cluster_warnings,
+    key_insights,
+  };
 }
 
 /**

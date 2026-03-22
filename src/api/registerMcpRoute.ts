@@ -332,7 +332,7 @@ const MCP_TOOLS = [
   {
     name: SCAN_UPCOMING_UNLOCKS_TOOL_NAME,
     description:
-      "Scan the full token registry (manual CSV + unlockRegistry.json) for upcoming unlocks in the next N days. Does not require token_symbol. Answers: Which tokens have large unlocks? Upcoming high impact token unlocks? What token unlocks should traders watch this month? Uses the same risk engine as analyze_token_supply_risk per token.",
+      "Scan the full token registry (manual CSV + unlockRegistry.json) for upcoming unlocks in the next N days. Does not require token_symbol. Ranks by impact_score (supply % vs volume-days). Detects same-day unlock clusters and returns key_insights (highest impact, cluster warnings, events ≤3 days). Uses the same risk engine as analyze_token_supply_risk per token (PostgreSQL registry + Redis unlock cache).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -344,7 +344,7 @@ const MCP_TOOLS = [
         },
         limit: {
           type: "number" as const,
-          description: "Optional max number of rows to return after sorting by unlock_percent.",
+          description: "Optional max number of rows to return after sorting by impact_score DESC.",
         },
       },
       required: [] as const,
@@ -355,7 +355,7 @@ const MCP_TOOLS = [
       properties: {
         upcoming_unlocks: {
           type: "array" as const,
-          description: "Tokens with next_unlock in window, unlock_percent > 0, sorted by unlock_percent DESC.",
+          description: "Tokens with next unlock in window, unlock_percent > 0, sorted by impact_score DESC.",
           items: {
             type: "object" as const,
             properties: {
@@ -366,11 +366,28 @@ const MCP_TOOLS = [
               days_until: { type: "number" as const },
               unlock_percent: { type: "number" as const },
               volume_ratio_days: { type: "number" as const },
+              impact_score: { type: "number" as const, description: "(unlock_percent * 0.6) + (volume_ratio_days * 0.4)" },
             },
           },
         },
+        cluster_warnings: {
+          type: "array" as const,
+          description: "Dates where 2+ distinct tokens unlock the same calendar day.",
+          items: {
+            type: "object" as const,
+            properties: {
+              date: { type: "string" as const },
+              tokens: { type: "array" as const, items: { type: "string" as const } },
+              message: { type: "string" as const },
+            },
+          },
+        },
+        key_insights: {
+          type: "string" as const,
+          description: "Key Insights: highest impact unlock, cluster summary, immediate (≤3d) events.",
+        },
       },
-      required: ["upcoming_unlocks"] as const,
+      required: ["upcoming_unlocks", "cluster_warnings", "key_insights"] as const,
     },
   },
 ];
@@ -689,7 +706,9 @@ function ensureFlatResultPayload(
   if (typeof (response as JsonRpcSuccess).result === "object" && (response as JsonRpcSuccess).result != null && !Array.isArray((response as JsonRpcSuccess).result)) {
     const res = (response as JsonRpcSuccess).result as Record<string, unknown>;
     const skipInstitutionalSanitize =
-      Array.isArray(res.upcoming_unlocks) || Array.isArray(res.registry_high_impact_unlocks);
+      Array.isArray(res.upcoming_unlocks) ||
+      Array.isArray(res.registry_high_impact_unlocks) ||
+      typeof res.key_insights === "string";
     if (!skipInstitutionalSanitize) {
       (response as JsonRpcSuccess).result = sanitizeUserFacingOutput(res);
     }
@@ -710,9 +729,19 @@ function addToolsCallContentCompat(response: JsonRpcSuccess | JsonRpcErrorBody):
     const first = obj.content[0] as Record<string, unknown> | undefined;
     if (first?.type === "text" && typeof first.text === "string") return response;
   }
+  /** scan_upcoming_unlocks: lead with Key Insights, then structured JSON (structuredContent stays full). */
+  const textForClient =
+    typeof obj.key_insights === "string" &&
+    Array.isArray(obj.upcoming_unlocks) &&
+    Array.isArray(obj.cluster_warnings)
+      ? `${obj.key_insights}\n\n${JSON.stringify({
+          upcoming_unlocks: obj.upcoming_unlocks,
+          cluster_warnings: obj.cluster_warnings,
+        })}`
+      : JSON.stringify(obj);
   (response as JsonRpcSuccess).result = {
     ...obj,
-    content: [{ type: "text" as const, text: JSON.stringify(obj) }],
+    content: [{ type: "text" as const, text: textForClient }],
     structuredContent: obj,
     isError: false,
   };
@@ -1010,7 +1039,11 @@ async function handleScanUpcomingUnlocks(
     return jsonRpcSuccess(id, result);
   } catch (err) {
     logger.error({ err }, "SCAN_UPCOMING_UNLOCKS_FAILED");
-    return jsonRpcSuccess(id, { upcoming_unlocks: [] } as Record<string, unknown>);
+    return jsonRpcSuccess(id, {
+      upcoming_unlocks: [],
+      cluster_warnings: [],
+      key_insights: "Key Insights:\n\n- Scan failed; no data returned.",
+    });
   }
 }
 
