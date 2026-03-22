@@ -889,12 +889,19 @@ export async function runAnalyzeTokenSupplyRisk(
   return { success: true, data: flat };
 }
 
+/** Scan window: only include tokens with an upcoming unlock in this many days (inclusive). */
+const SCAN_HIGH_IMPACT_MAX_DAYS_UNTIL = 30;
+
 /**
  * Registry-wide scan: iterate all manual-registry symbols, run the same
- * analyze_token_supply_risk pipeline as individual queries. Filters to upcoming
- * unlocks within timeframe_days and high-impact rows:
- * risk_tier >= ELEVATED OR unlock_percent >= 2.5 OR volume_ratio_days >= 1 (2.5% catches ~2.57% ARB-class rows).
- * Sorted by unlock_percent_of_supply DESC.
+ * analyze_token_supply_risk pipeline as individual queries.
+ *
+ * Inclusion requires ALL of:
+ * - next unlock timestamp present (no null unlock date)
+ * - 0 <= days_until_unlock <= SCAN_HIGH_IMPACT_MAX_DAYS_UNTIL
+ * - unlock_percent > 0 (registry or vesting schedule % of supply)
+ *
+ * Excludes tokens with no upcoming unlock or 0% unlock. Sorted by unlock_percent_of_supply DESC.
  */
 export async function scanRegistryHighImpactUnlocks(
   deps: UnlockIntelligenceDeps,
@@ -905,23 +912,16 @@ export async function scanRegistryHighImpactUnlocks(
   }
 ): Promise<HighImpactUnlockEntry[]> {
   const symbols = Array.from(MANUAL_REGISTRY_SYMBOLS);
-  const timeframeDays = typeof options?.timeframe_days === "number" ? options.timeframe_days : DEFAULT_TIMEFRAME_DAYS;
+  const analysisWindowDays =
+    typeof options?.timeframe_days === "number" && options.timeframe_days > 0
+      ? options.timeframe_days
+      : DEFAULT_TIMEFRAME_DAYS;
   const nowSec = Math.floor(Date.now() / 1000);
-  const windowEndSec = nowSec + timeframeDays * 86400;
   const results: HighImpactUnlockEntry[] = [];
-
-  const tierRank = (t: string): number => {
-    const x = t.toUpperCase();
-    if (x === "CRITICAL") return 4;
-    if (x === "HIGH") return 3;
-    if (x === "ELEVATED") return 2;
-    if (x === "MINOR") return 1;
-    return 0;
-  };
 
   for (const symbol of symbols) {
     const res = await runAnalyzeTokenSupplyRisk(
-      { token_symbol: symbol, timeframe_days: timeframeDays },
+      { token_symbol: symbol, timeframe_days: analysisWindowDays },
       deps
     );
     if (!res.success) continue;
@@ -931,7 +931,13 @@ export async function scanRegistryHighImpactUnlocks(
 
     if (flat.unlock_schedule_status !== "active") continue;
     const ts = flat.next_estimated_unlock_timestamp;
-    if (ts == null || !Number.isFinite(ts) || ts < nowSec || ts > windowEndSec) continue;
+    /** Require a concrete next unlock (excludes null unlock_date). */
+    if (ts == null || !Number.isFinite(ts)) continue;
+
+    const daysUntilRaw = (ts - nowSec) / 86400;
+    const daysUntil = Math.ceil(daysUntilRaw);
+    /** Upcoming only; must fall within next 30 days. */
+    if (daysUntil < 0 || daysUntil > SCAN_HIGH_IMPACT_MAX_DAYS_UNTIL) continue;
 
     let unlockPercentOfSupply: number | null = null;
     if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
@@ -944,6 +950,8 @@ export async function scanRegistryHighImpactUnlocks(
       unlockPercentOfSupply = flat.vesting_schedule.unlock_percent_of_total_supply;
     }
 
+    if (unlockPercentOfSupply == null || !(unlockPercentOfSupply > 0)) continue;
+
     const pressure =
       typeof flat.unlock_pressure_ratio === "number" && Number.isFinite(flat.unlock_pressure_ratio)
         ? flat.unlock_pressure_ratio
@@ -951,22 +959,13 @@ export async function scanRegistryHighImpactUnlocks(
     const volumeRatioDays = Number((pressure * 30).toFixed(1));
     const tier = String(flat.final_risk_tier ?? "MINOR");
 
-    const meetsHighImpact =
-      tierRank(tier) >= tierRank("ELEVATED") ||
-      (typeof unlockPercentOfSupply === "number" && unlockPercentOfSupply >= 2.5) ||
-      volumeRatioDays >= 1;
-
-    if (!meetsHighImpact) continue;
-
-    const daysUntil = Math.max(0, Math.ceil((ts - nowSec) / 86400));
-
     results.push({
       token_symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
       final_risk_tier: tier,
       unlock_percent_of_supply: unlockPercentOfSupply,
       volume_ratio_days: volumeRatioDays,
       next_estimated_unlock_timestamp: ts,
-      days_until_unlock: daysUntil,
+      days_until_unlock: Math.max(0, daysUntil),
       analysis_scope: flat.analysis_scope,
     });
   }
