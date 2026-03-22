@@ -11,6 +11,7 @@ import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.
 import {
   runAnalyzeTokenSupplyRisk,
   scanRegistryHighImpactUnlocks,
+  scanUpcomingUnlocks,
   buildSoftFailureSupplyRisk,
   buildCompletedNoDataSupplyRisk,
   type SupplyRiskOutputFlat,
@@ -42,10 +43,11 @@ export interface JsonRpcErrorBody {
 }
 
 // ---------------------------------------------------------------------------
-// Tool definitions (single authoritative tool; no overlapping unlock-only tool)
+// Tool definitions: supply risk analysis + global registry scan
 // ---------------------------------------------------------------------------
 
 const SUPPLY_RISK_TOOL_NAME = "analyze_token_supply_risk";
+const SCAN_UPCOMING_UNLOCKS_TOOL_NAME = "scan_upcoming_unlocks";
 
 const MCP_TOOLS = [
   {
@@ -325,6 +327,50 @@ const MCP_TOOLS = [
         "engine_version",
         "data_freshness_seconds",
       ] as const,
+    },
+  },
+  {
+    name: SCAN_UPCOMING_UNLOCKS_TOOL_NAME,
+    description:
+      "Scan the full token registry (manual CSV + unlockRegistry.json) for upcoming unlocks in the next N days. Does not require token_symbol. Answers: Which tokens have large unlocks? Upcoming high impact token unlocks? What token unlocks should traders watch this month? Uses the same risk engine as analyze_token_supply_risk per token.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        days: {
+          type: "number" as const,
+          description: "Lookahead window in days for the next unlock (default 30).",
+          default: 30,
+          examples: [7, 30, 90],
+        },
+        limit: {
+          type: "number" as const,
+          description: "Optional max number of rows to return after sorting by unlock_percent.",
+        },
+      },
+      required: [] as const,
+      description: "Optional parameters only. Omit token_symbol — this tool scans all registry symbols.",
+    },
+    outputSchema: {
+      type: "object" as const,
+      properties: {
+        upcoming_unlocks: {
+          type: "array" as const,
+          description: "Tokens with next_unlock in window, unlock_percent > 0, sorted by unlock_percent DESC.",
+          items: {
+            type: "object" as const,
+            properties: {
+              symbol: { type: "string" as const },
+              risk_tier: { type: "string" as const },
+              severity: { type: "string" as const },
+              unlock_date: { type: "string" as const },
+              days_until: { type: "number" as const },
+              unlock_percent: { type: "number" as const },
+              volume_ratio_days: { type: "number" as const },
+            },
+          },
+        },
+      },
+      required: ["upcoming_unlocks"] as const,
     },
   },
 ];
@@ -641,7 +687,12 @@ function ensureFlatResultPayload(
         : buildSoftFailureSupplyRisk("NO_DATA_RETURNED", 0);
   }
   if (typeof (response as JsonRpcSuccess).result === "object" && (response as JsonRpcSuccess).result != null && !Array.isArray((response as JsonRpcSuccess).result)) {
-    (response as JsonRpcSuccess).result = sanitizeUserFacingOutput((response as JsonRpcSuccess).result as Record<string, unknown>);
+    const res = (response as JsonRpcSuccess).result as Record<string, unknown>;
+    const skipInstitutionalSanitize =
+      Array.isArray(res.upcoming_unlocks) || Array.isArray(res.registry_high_impact_unlocks);
+    if (!skipInstitutionalSanitize) {
+      (response as JsonRpcSuccess).result = sanitizeUserFacingOutput(res);
+    }
   }
   return response;
 }
@@ -946,6 +997,23 @@ async function handleAnalyzeTokenSupplyRisk(
   }
 }
 
+async function handleScanUpcomingUnlocks(
+  id: string | number | null,
+  args: Record<string, unknown>,
+  deps: UnlockIntelligenceDeps
+): Promise<JsonRpcSuccess | JsonRpcErrorBody> {
+  const days = typeof args.days === "number" && Number.isFinite(args.days) && args.days > 0 ? args.days : 30;
+  const limit =
+    typeof args.limit === "number" && Number.isFinite(args.limit) && args.limit > 0 ? args.limit : undefined;
+  try {
+    const result = await scanUpcomingUnlocks(deps, { days, limit });
+    return jsonRpcSuccess(id, result);
+  } catch (err) {
+    logger.error({ err }, "SCAN_UPCOMING_UNLOCKS_FAILED");
+    return jsonRpcSuccess(id, { upcoming_unlocks: [] } as Record<string, unknown>);
+  }
+}
+
 async function handleCallTool(
   id: string | number | null,
   params: unknown,
@@ -976,6 +1044,10 @@ async function handleCallTool(
   const registryScan =
     (args as { registry_scan?: unknown }).registry_scan === true;
 
+  if (name === SCAN_UPCOMING_UNLOCKS_TOOL_NAME) {
+    return handleScanUpcomingUnlocks(id, args, deps);
+  }
+
   if (name === SUPPLY_RISK_TOOL_NAME) {
     if (tokenSymbol != null && typeof tokenSymbol !== "string") {
       return jsonRpcError(id, -32602, "Invalid params: token_symbol must be a string.");
@@ -988,7 +1060,11 @@ async function handleCallTool(
   }
 
   logger.warn({ name }, "MCP unknown tool");
-  return jsonRpcError(id, -32602, `Unknown tool: ${name || "(missing)"}. Use ${SUPPLY_RISK_TOOL_NAME} for token unlock and supply risk analysis.`);
+  return jsonRpcError(
+    id,
+    -32602,
+    `Unknown tool: ${name || "(missing)"}. Use ${SUPPLY_RISK_TOOL_NAME} or ${SCAN_UPCOMING_UNLOCKS_TOOL_NAME}.`
+  );
 }
 
 function handleInitialize(id: string | number | null): JsonRpcSuccess {

@@ -2,6 +2,8 @@
  * Multi-chain token supply risk engine: registry-based or dynamic (any ERC-20/BEP-20).
  */
 
+import * as fs from "fs";
+import * as path from "path";
 import type { UnlockIntelligenceDeps } from "../intelligence/unlockIntelligence.js";
 import { getScheduleByTokenCaseInsensitive, getUnlockEventsInRange } from "../ingestion/unlockRegistry.js";
 import { resolveTokenBySymbol, createUnlockTokenRegistry } from "../utils/tokenResolver.js";
@@ -211,6 +213,122 @@ export interface HighImpactUnlockEntry {
   next_estimated_unlock_timestamp: number | null;
   days_until_unlock: number | null;
   analysis_scope: SupplyRiskOutputFlat["analysis_scope"];
+}
+
+/** MCP tool `scan_upcoming_unlocks` row shape. */
+export interface UpcomingUnlockRow {
+  symbol: string;
+  risk_tier: string;
+  severity: string;
+  unlock_date: string;
+  days_until: number;
+  unlock_percent: number;
+  volume_ratio_days: number;
+}
+
+export interface ScanUpcomingUnlocksResult {
+  upcoming_unlocks: UpcomingUnlockRow[];
+}
+
+/**
+ * Unique symbols from manual_registry CSV (generated set) plus data/unlockRegistry.json.
+ */
+export function mergeRegistrySymbolList(): string[] {
+  const set = new Set<string>();
+  for (const s of MANUAL_REGISTRY_SYMBOLS) set.add(s);
+  for (const s of loadUnlockRegistryJsonSymbols()) set.add(s);
+  return [...set].sort();
+}
+
+function loadUnlockRegistryJsonSymbols(): string[] {
+  const candidates = [
+    path.join(process.cwd(), "data", "unlockRegistry.json"),
+    path.join(process.cwd(), "dist", "data", "unlockRegistry.json"),
+    path.join(__dirname, "..", "..", "data", "unlockRegistry.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const raw = fs.readFileSync(p, "utf8");
+      const arr = JSON.parse(raw) as Array<{ token_symbol?: string }>;
+      if (!Array.isArray(arr)) return [];
+      return arr
+        .map((x) => String(x.token_symbol ?? "").trim().toUpperCase().replace(/^\$/, ""))
+        .filter((s) => s.length > 0);
+    } catch {
+      /* try next path */
+    }
+  }
+  return [];
+}
+
+/**
+ * Global registry scan for MCP tool `scan_upcoming_unlocks`.
+ * No token_symbol required. Uses same engine as analyze_token_supply_risk per symbol.
+ */
+export async function scanUpcomingUnlocks(
+  deps: UnlockIntelligenceDeps,
+  options?: { days?: number; limit?: number }
+): Promise<ScanUpcomingUnlocksResult> {
+  const maxDays = typeof options?.days === "number" && Number.isFinite(options.days) && options.days > 0 ? options.days : DEFAULT_TIMEFRAME_DAYS;
+  const limit = typeof options?.limit === "number" && options.limit > 0 ? options.limit : undefined;
+  const symbols = mergeRegistrySymbolList();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const rows: UpcomingUnlockRow[] = [];
+
+  for (const symbol of symbols) {
+    const res = await runAnalyzeTokenSupplyRisk(
+      { token_symbol: symbol, timeframe_days: maxDays },
+      deps
+    );
+    if (!res.success) continue;
+    const data = res.data as SupplyRiskOutputFlat | UnsupportedChainData;
+    if ((data as UnsupportedChainData).status === "unsupported_chain") continue;
+    const flat = data as SupplyRiskOutputFlat;
+
+    if (flat.unlock_schedule_status !== "active") continue;
+    const ts = flat.next_estimated_unlock_timestamp;
+    if (ts == null || !Number.isFinite(ts)) continue;
+
+    const daysUntil = Math.ceil((ts - nowSec) / 86400);
+    if (daysUntil < 0 || daysUntil > maxDays) continue;
+
+    let unlockPercent: number | null = null;
+    if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
+      unlockPercent = flat.registry_unlock_percent;
+    } else if (
+      flat.vesting_schedule &&
+      typeof flat.vesting_schedule.unlock_percent_of_total_supply === "number" &&
+      Number.isFinite(flat.vesting_schedule.unlock_percent_of_total_supply)
+    ) {
+      unlockPercent = flat.vesting_schedule.unlock_percent_of_total_supply;
+    }
+
+    if (unlockPercent == null || !(unlockPercent > 0)) continue;
+
+    const pressure =
+      typeof flat.unlock_pressure_ratio === "number" && Number.isFinite(flat.unlock_pressure_ratio)
+        ? flat.unlock_pressure_ratio
+        : 0;
+    const volumeRatioDays = Number((pressure * 30).toFixed(1));
+    const unlock_date = new Date(ts * 1000).toISOString().slice(0, 10);
+
+    rows.push({
+      symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
+      risk_tier: String(flat.final_risk_tier ?? "MINOR"),
+      severity: String(flat.event_severity_label ?? "MINIMAL"),
+      unlock_date,
+      days_until: Math.max(0, daysUntil),
+      unlock_percent: unlockPercent,
+      volume_ratio_days: volumeRatioDays,
+    });
+  }
+
+  rows.sort((a, b) => b.unlock_percent - a.unlock_percent);
+  if (limit != null) {
+    return { upcoming_unlocks: rows.slice(0, limit) };
+  }
+  return { upcoming_unlocks: rows };
 }
 
 /**
@@ -911,7 +1029,7 @@ export async function scanRegistryHighImpactUnlocks(
     limit?: number;
   }
 ): Promise<HighImpactUnlockEntry[]> {
-  const symbols = Array.from(MANUAL_REGISTRY_SYMBOLS);
+  const symbols = mergeRegistrySymbolList();
   const analysisWindowDays =
     typeof options?.timeframe_days === "number" && options.timeframe_days > 0
       ? options.timeframe_days

@@ -15,6 +15,14 @@ if (fs.existsSync(sqlSrc)) {
   }
 }
 
+// Copy data/unlockRegistry.json to dist/data for runtime mergeRegistrySymbolList()
+const jsonSrc = path.join(__dirname, "..", "data", "unlockRegistry.json");
+const jsonDestDir = path.join(__dirname, "..", "dist", "data");
+if (fs.existsSync(jsonSrc)) {
+  fs.mkdirSync(jsonDestDir, { recursive: true });
+  fs.copyFileSync(jsonSrc, path.join(jsonDestDir, "unlockRegistry.json"));
+}
+
 // Copy manual_registry.csv to dist/scripts/ for Railway deploy
 const csvSrc = path.join(__dirname, "..", "src", "scripts", "manual_registry.csv");
 const scriptsDest = path.join(__dirname, "..", "dist", "scripts");

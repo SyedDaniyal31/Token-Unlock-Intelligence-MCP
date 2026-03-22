@@ -21,6 +21,7 @@ export const manualRegistryProvider: UnlockProvider = {
     try {
       const nowSec = Math.floor(Date.now() / 1000);
       const symbol = asset.symbol.toUpperCase().trim();
+      /** Symbol match: equivalent to UPPER(token_symbol) = UPPER($symbol); TRIM handles padded CSV values. Future unlocks only. */
       const result = await query<{
         token_symbol: string;
         unlock_timestamp: string | number;
