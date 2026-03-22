@@ -254,6 +254,7 @@ const MCP_TOOLS = [
           properties: {
             severity: { type: "string" as const, enum: ["EXTREME", "HIGH", "ELEVATED", "MODERATE"] as const },
             unlock_percent_of_total_supply: { type: ["number", "null"] as const, description: "From manual registry; null when missing." },
+            unlock_percent: { type: ["number", "null"] as const, description: "Alias for unlock_percent_of_total_supply (% of total supply)." },
             unlock_amount: { type: ["number", "null"] as const },
             unlock_date: { type: ["string", "null"] as const },
             days_until_unlock: { type: ["number", "null"] as const },
@@ -531,6 +532,8 @@ function buildInstitutionalOutput(obj: Record<string, unknown>): Record<string, 
   out.unlock_event_assessment = {
     severity: riskLabels.event_severity_label,
     unlock_percent_of_total_supply: magnitudePct,
+    /** Alias for unlock_percent_of_total_supply (registry % of supply, 0–100). */
+    unlock_percent: magnitudePct,
     unlock_amount: unlockAmountUsd ?? null,
     unlock_date: eventDate,
     days_until_unlock: daysUntilUnlock,
@@ -840,18 +843,12 @@ async function handleAnalyzeTokenSupplyRisk(
         typeof (args as { timeframe_days?: unknown }).timeframe_days === "number"
           ? ((args as { timeframe_days: number }).timeframe_days)
           : undefined;
-      const minTierRaw = (args as { min_risk_tier?: unknown }).min_risk_tier;
-      const minTier =
-        minTierRaw === "HIGH" || minTierRaw === "CRITICAL" || minTierRaw === "ELEVATED"
-          ? minTierRaw
-          : "ELEVATED";
       const limit =
         typeof (args as { limit?: unknown }).limit === "number"
           ? ((args as { limit: number }).limit)
           : undefined;
       const entries = await scanRegistryHighImpactUnlocks(deps, {
         timeframe_days: timeframeDays,
-        min_risk_tier: minTier,
         limit,
       });
       return jsonRpcSuccess(id, {

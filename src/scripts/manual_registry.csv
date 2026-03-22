@@ -1,4 +1,5 @@
 project_name,token_symbol,circulating_supply,unlock_amount,unlock_percent,unlock_date
+Arbitrum,ARB,3600000000,92650000,2.57,2026-04-16 00:00:00 UTC
 Dynachain,DYNA,41050000,10800000,2.16,2026-02-28 03:25:00 UTC
 Ika,IKA,3.00E+09,2.19E+08,2.14,2026-02-28 09:25:00 UTC
 Delabs Games,DELABS,7.50E+08,72660000,2.42,2026-02-28 09:25:00 UTC

@@ -206,6 +206,8 @@ export interface HighImpactUnlockEntry {
   token_symbol: string;
   final_risk_tier: string;
   unlock_percent_of_supply: number | null;
+  /** unlock_pressure_ratio * 30 (same as market_impact_analysis.volume_ratio_days). */
+  volume_ratio_days: number;
   next_estimated_unlock_timestamp: number | null;
   days_until_unlock: number | null;
   analysis_scope: SupplyRiskOutputFlat["analysis_scope"];
@@ -730,7 +732,15 @@ export async function runAnalyzeTokenSupplyRisk(
         );
         return { success: true, data: noData };
       }
-      return { success: true, data: { ...full, analysis_completion_status: "success", data_availability_status: full.data_availability_status ?? "data_available" } };
+      return {
+        success: true,
+        data: {
+          ...full,
+          token_symbol: symbol || (full as unknown as { token_symbol?: string }).token_symbol,
+          analysis_completion_status: "success",
+          data_availability_status: full.data_availability_status ?? "data_available",
+        },
+      };
     } catch (err) {
       const engine_latency_ms = Math.max(0, Date.now() - engineStart);
       return { success: true, data: buildCompletedNoDataSupplyRisk(engine_latency_ms) };
@@ -881,32 +891,33 @@ export async function runAnalyzeTokenSupplyRisk(
 
 /**
  * Registry-wide scan: iterate all manual-registry symbols, run the same
- * analyze_token_supply_risk pipeline used for individual tokens, and return
- * only tokens with final_risk_tier >= ELEVATED, sorted by
- * unlock_percent_of_supply (desc).
+ * analyze_token_supply_risk pipeline as individual queries. Filters to upcoming
+ * unlocks within timeframe_days and high-impact rows:
+ * risk_tier >= ELEVATED OR unlock_percent >= 2.5 OR volume_ratio_days >= 1 (2.5% catches ~2.57% ARB-class rows).
+ * Sorted by unlock_percent_of_supply DESC.
  */
 export async function scanRegistryHighImpactUnlocks(
   deps: UnlockIntelligenceDeps,
   options?: {
     timeframe_days?: number;
-    /** Minimum tier to include; default "ELEVATED". */
-    min_risk_tier?: "ELEVATED" | "HIGH" | "CRITICAL";
     /** Optional cap on number of returned entries (after sorting). */
     limit?: number;
   }
 ): Promise<HighImpactUnlockEntry[]> {
   const symbols = Array.from(MANUAL_REGISTRY_SYMBOLS);
   const timeframeDays = typeof options?.timeframe_days === "number" ? options.timeframe_days : DEFAULT_TIMEFRAME_DAYS;
-  const minTier = options?.min_risk_tier ?? "ELEVATED";
-  const allowedTiers: Set<string> =
-    minTier === "CRITICAL"
-      ? new Set(["CRITICAL"])
-      : minTier === "HIGH"
-        ? new Set(["HIGH", "CRITICAL"])
-        : new Set(["ELEVATED", "HIGH", "CRITICAL"]);
-
   const nowSec = Math.floor(Date.now() / 1000);
+  const windowEndSec = nowSec + timeframeDays * 86400;
   const results: HighImpactUnlockEntry[] = [];
+
+  const tierRank = (t: string): number => {
+    const x = t.toUpperCase();
+    if (x === "CRITICAL") return 4;
+    if (x === "HIGH") return 3;
+    if (x === "ELEVATED") return 2;
+    if (x === "MINOR") return 1;
+    return 0;
+  };
 
   for (const symbol of symbols) {
     const res = await runAnalyzeTokenSupplyRisk(
@@ -918,10 +929,10 @@ export async function scanRegistryHighImpactUnlocks(
     if ((data as UnsupportedChainData).status === "unsupported_chain") continue;
     const flat = data as SupplyRiskOutputFlat;
 
-    if (!flat.final_risk_tier || !allowedTiers.has(String(flat.final_risk_tier))) continue;
     if (flat.unlock_schedule_status !== "active") continue;
+    const ts = flat.next_estimated_unlock_timestamp;
+    if (ts == null || !Number.isFinite(ts) || ts < nowSec || ts > windowEndSec) continue;
 
-    // Prefer registry unlock percent (manual registry) when present, else vesting schedule % of total supply.
     let unlockPercentOfSupply: number | null = null;
     if (typeof flat.registry_unlock_percent === "number" && Number.isFinite(flat.registry_unlock_percent)) {
       unlockPercentOfSupply = flat.registry_unlock_percent;
@@ -933,15 +944,28 @@ export async function scanRegistryHighImpactUnlocks(
       unlockPercentOfSupply = flat.vesting_schedule.unlock_percent_of_total_supply;
     }
 
-    const ts = flat.next_estimated_unlock_timestamp;
-    const daysUntil =
-      ts != null && Number.isFinite(ts) ? Math.max(0, Math.ceil(ts - nowSec) / 86400) : null;
+    const pressure =
+      typeof flat.unlock_pressure_ratio === "number" && Number.isFinite(flat.unlock_pressure_ratio)
+        ? flat.unlock_pressure_ratio
+        : 0;
+    const volumeRatioDays = Number((pressure * 30).toFixed(1));
+    const tier = String(flat.final_risk_tier ?? "MINOR");
+
+    const meetsHighImpact =
+      tierRank(tier) >= tierRank("ELEVATED") ||
+      (typeof unlockPercentOfSupply === "number" && unlockPercentOfSupply >= 2.5) ||
+      volumeRatioDays >= 1;
+
+    if (!meetsHighImpact) continue;
+
+    const daysUntil = Math.max(0, Math.ceil((ts - nowSec) / 86400));
 
     results.push({
       token_symbol: (flat as unknown as { token_symbol?: string }).token_symbol ?? symbol,
-      final_risk_tier: String(flat.final_risk_tier),
+      final_risk_tier: tier,
       unlock_percent_of_supply: unlockPercentOfSupply,
-      next_estimated_unlock_timestamp: ts ?? null,
+      volume_ratio_days: volumeRatioDays,
+      next_estimated_unlock_timestamp: ts,
       days_until_unlock: daysUntil,
       analysis_scope: flat.analysis_scope,
     });

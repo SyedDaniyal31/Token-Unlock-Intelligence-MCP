@@ -462,13 +462,14 @@ export async function runDynamicSupplyEngine(
   let registryUnlockPercent: number | null = null;
   let unlockPercentOfTotalSupply: number | null = null;
   const totalSupplyNum = Number(totalSupply);
-  const nextUnlockEvent = unlockData.events
+  const registryEvents = unlockData.events ?? [];
+  const nextUnlockEvent = registryEvents
     .filter((e) => e.unlock_timestamp > Math.floor(executionNowMs / 1000))
     .sort((a, b) => a.unlock_timestamp - b.unlock_timestamp)[0] ?? null;
   const nextUnlockAmount = nextUnlockEvent != null ? Number(nextUnlockEvent.unlock_amount) : 0;
 
-  if (unlock_data_available && unlockData.events.length > 0) {
-    const rawPcts = unlockData.events
+  if (unlock_data_available && registryEvents.length > 0) {
+    const rawPcts = registryEvents
       .map((e) => (e.unlock_percent != null && Number.isFinite(e.unlock_percent) ? e.unlock_percent : null))
       .filter((p): p is number => p != null && p > 0);
     if (rawPcts.length > 0) {
@@ -502,10 +503,17 @@ export async function runDynamicSupplyEngine(
   const supplyForUnlock = Math.max(0, totalSupply);
   const inflation90dPct = Number.isFinite(inflation90d) && inflation90d >= 0 ? inflation90d : 0;
   const unlockAmountTokens = supplyForUnlock * (inflation90dPct / 100);
-  const unlockAmountUsd =
+  /** Prefer next scheduled registry/calendar unlock (tokens × price); do not use inflation proxy when real events exist. */
+  let unlockAmountUsd =
     Number.isFinite(unlockAmountTokens) && Number.isFinite(priceForUnlock) && priceForUnlock >= 0
       ? Math.max(0, unlockAmountTokens * priceForUnlock)
       : 0;
+  if (unlock_data_available && nextUnlockEvent != null && priceForUnlock > 0) {
+    const nextAmt = Number(nextUnlockEvent.unlock_amount);
+    if (Number.isFinite(nextAmt) && nextAmt > 0) {
+      unlockAmountUsd = Math.max(0, nextAmt * priceForUnlock);
+    }
+  }
   const unlockMarketCapImpact =
     enrichment != null && enrichment.marketCapUsd > 0 && Number.isFinite(unlockAmountUsd)
       ? clamp(unlockAmountUsd / enrichment.marketCapUsd, 0, 1e6)
@@ -752,13 +760,17 @@ export async function runDynamicSupplyEngine(
     out.market_cap_usd = Number.isFinite(enrichment.marketCapUsd) ? Math.max(0, enrichment.marketCapUsd) : undefined;
     out.volume_24h_usd = Number.isFinite(enrichment.volume24hUsd) ? Math.max(0, enrichment.volume24hUsd) : undefined;
     out.liquidity_usd = Number.isFinite(enrichment.liquidityUsd) ? Math.max(0, enrichment.liquidityUsd) : undefined;
-    out.unlock_amount_usd = Number.isFinite(unlockAmountUsd) ? Math.max(0, unlockAmountUsd) : undefined;
     out.unlock_market_cap_impact = Number.isFinite(unlockMarketCapImpact) ? Math.max(0, unlockMarketCapImpact) : undefined;
+  }
+  /** Always expose USD unlock size when computed (registry path), even if market enrichment failed. */
+  if (Number.isFinite(unlockAmountUsd)) {
+    out.unlock_amount_usd = Math.max(0, unlockAmountUsd);
   }
 
   const noUnlockEvents = !unlock_data_available;
+  /** Never overwrite registry/calendar unlock provenance with holder mode (fixes ARB etc. when volume30d=0). */
   const shouldUseHolderFallback =
-    noUnlockEvents || unlockPatternType === "unknown" || dataQualityScore < 10;
+    noUnlockEvents && (unlockPatternType === "unknown" || dataQualityScore < 10);
 
   if (shouldUseHolderFallback) {
     const holderDeadline = Math.min(deadline, Date.now() + 2000);
@@ -811,7 +823,7 @@ export async function runDynamicSupplyEngine(
     out.unlock_percent_of_total_supply = unlockPercentOfTotalSupply;
   }
 
-  if (unlock_data_available && unlockData.events.length > 0) {
+  if (unlock_data_available && registryEvents.length > 0) {
     try {
       const circ = enrichment?.circulatingSupply;
       const total = totalSupply > 0 ? totalSupply : null;
@@ -820,7 +832,7 @@ export async function runDynamicSupplyEngine(
           ? circ
           : (totalSupply > 0 ? totalSupply : null);
       out.vesting_schedule = parseVestingFromEvents(
-        unlockData.events,
+        registryEvents,
         total,
         circulating,
         asset.symbol
